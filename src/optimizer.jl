@@ -172,7 +172,7 @@ _algorithm(model::Optimizer) =
     something(model.algorithm, _default(Algorithm()))
 
 MOI.get(::Optimizer, ::MOI.SolverName) = "DisjunctiveAlgorithms"
-MOI.get(::Optimizer, ::MOI.SolverVersion) = "0.1.0"
+MOI.get(::Optimizer, ::MOI.SolverVersion) = string(pkgversion(@__MODULE__))
 
 MOI.is_empty(model::Optimizer) = MOI.is_empty(model.cache)
 
@@ -260,7 +260,7 @@ end
 function MOI.supports_constraint(
     ::Optimizer,
     ::Type{MOI.VariableIndex},
-    ::Type{<:Union{_SupportedInnerSet, MOI.ZeroOne, MOI.Integer}}
+    ::Type{<:Union{SupportedInnerSet, MOI.ZeroOne, MOI.Integer}}
     )
     return true
 end
@@ -268,7 +268,7 @@ end
 function MOI.supports_constraint(
     ::Optimizer,
     ::Type{<:_ScalarFunction},
-    ::Type{<:_SupportedInnerSet}
+    ::Type{<:SupportedInnerSet}
     )
     return true
 end
@@ -309,6 +309,16 @@ end
 # unsupported one on copy_to.
 MOI.supports(model::Optimizer, attr::MOI.AbstractModelAttribute) =
     MOI.supports(model.cache.model, attr)
+
+# Objective functions `_build_problem` can consume; the generic
+# forwarding above would claim vector objectives the solve rejects.
+const _ObjectiveFunction = Union{MOI.VariableIndex,
+    MOI.ScalarAffineFunction{Float64},
+    MOI.ScalarQuadraticFunction{Float64}, MOI.ScalarNonlinearFunction}
+
+function MOI.supports(::Optimizer, ::MOI.ObjectiveFunction{F}) where {F}
+    return F <: _ObjectiveFunction
+end
 
 function MOI.set(model::Optimizer, attr::MOI.AbstractModelAttribute, value)
     MOI.supports(model, attr) || throw(MOI.UnsupportedAttribute(attr))

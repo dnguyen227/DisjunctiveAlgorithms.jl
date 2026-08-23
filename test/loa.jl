@@ -520,6 +520,82 @@ function test_master_abnormal_status()
     @test occursin("master solve finished", raw_status(model))
 end
 
+# An unbounded NLP restriction proves the model unbounded: the solve
+# reports `DUAL_INFEASIBLE` instead of an infeasibility or limit
+# status.
+function test_unbounded_model()
+    factory = optimizer_with_attributes(
+        () -> DA.Optimizer(HiGHS.Optimizer, HiGHS.Optimizer),
+        DA.MasterReformulation() => "bigm")
+    model = Model(factory)
+    set_silent(model)
+    @variable(model, x >= 0)
+    @variable(model, z[1:2], Bin)
+    @constraint(model, [1, z[1], z[2], x, x] in DA.DisjunctionSet([
+        [MOI.GreaterThan(2.0)], [MOI.GreaterThan(5.0)]]))
+    @objective(model, Max, x)
+    optimize!(model)
+    @test termination_status(model) == MOI.DUAL_INFEASIBLE
+    @test result_count(model) == 0
+    @test occursin("unbounded", raw_status(model))
+end
+
+# An NLP failure without an infeasibility certificate leaves its
+# combination unresolved. Both disjuncts are nonlinear so the cover
+# pass must visit both combinations: the first solves and gives the
+# incumbent, the second fails with `NUMERICAL_ERROR`, and exhaustion
+# must not claim local optimality over all combinations.
+function test_nlp_failure_unresolved()
+    factory = () -> DA.Optimizer(
+        () -> MockSolver(Ipopt.Optimizer;
+            fail_from = 2, fail_status = MOI.NUMERICAL_ERROR),
+        HiGHS.Optimizer)
+    model = Model(factory)
+    set_silent(model)
+    @variable(model, 0 <= x <= 10)
+    @variable(model, z[1:2], Bin)
+    @constraint(model, [1, z[1], z[2], x^2, x^2] in DA.DisjunctionSet([
+        [MOI.GreaterThan(4.0)], [MOI.GreaterThan(25.0)]]))
+    @objective(model, Min, x)
+    optimize!(model)
+    @test termination_status(model) == MOI.OTHER_LIMIT
+    @test primal_status(model) == MOI.FEASIBLE_POINT
+    @test occursin("1 unresolved", raw_status(model))
+end
+
+# Bad attribute values fail at set time, not mid-solve.
+function test_attribute_validation()
+    algorithm = DA.LOA()
+    @test_throws ErrorException MOI.set(algorithm, DA.OASlack(), 0.0)
+    @test_throws ErrorException MOI.set(algorithm, DA.OASlack(), -1.0)
+    @test_throws ErrorException MOI.set(algorithm,
+        DA.MasterReformulation(), "hull")
+    MOI.set(algorithm, DA.OASlack(), 5.0)
+    @test MOI.get(algorithm, DA.OASlack()) == 5.0
+    MOI.set(algorithm, DA.MasterReformulation(), "bigm")
+    @test MOI.get(algorithm, DA.MasterReformulation()) == "bigm"
+end
+
+# A genuinely nonlinear indicator row gets the curated error, not a
+# raw conversion failure.
+function test_nonlinear_indicator_error()
+    model = Model(_loa_optimizer())
+    set_silent(model)
+    @variable(model, 0 <= x <= 10)
+    @variable(model, z[1:2], Bin)
+    @constraint(model, [1, z[1] * z[2], z[2], x, x] in DA.DisjunctionSet([
+        [MOI.GreaterThan(2.0)], [MOI.GreaterThan(5.0)]]))
+    @objective(model, Min, x)
+    err = try
+        optimize!(model)
+        nothing
+    catch e
+        e
+    end
+    @test err isa ErrorException
+    @test occursin("Unsupported indicator expression", err.msg)
+end
+
 function _mock_time_limit_model(limit::Float64; kwargs...)
     factory = optimizer_with_attributes(
         () -> DA.Optimizer(() -> MockSolver(Ipopt.Optimizer; kwargs...),
@@ -748,6 +824,10 @@ end
     test_iteration_limit_no_incumbent()
     test_iteration_limit_with_incumbent()
     test_master_abnormal_status()
+    test_unbounded_model()
+    test_nlp_failure_unresolved()
+    test_attribute_validation()
+    test_nonlinear_indicator_error()
     test_strict_constant_solvers()
     test_time_limit_with_incumbent()
     test_master_abnormal_status_with_incumbent()

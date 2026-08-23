@@ -56,8 +56,10 @@ MOI.supports_incremental_interface(::MockSolver) = true
 MOI.copy_to(model::MockSolver, src::MOI.ModelLike) =
     MOI.copy_to(model.inner, src)
 MOI.add_variable(model::MockSolver) = MOI.add_variable(model.inner)
-MOI.delete(model::MockSolver, index) = MOI.delete(model.inner, index)
-MOI.is_valid(model::MockSolver, index) = MOI.is_valid(model.inner, index)
+MOI.delete(model::MockSolver, index::_WrappedIndex) =
+    MOI.delete(model.inner, index)
+MOI.is_valid(model::MockSolver, index::_WrappedIndex) =
+    MOI.is_valid(model.inner, index)
 
 function MOI.add_constraint(
     model::MockSolver,

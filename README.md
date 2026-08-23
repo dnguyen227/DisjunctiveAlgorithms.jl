@@ -18,6 +18,20 @@ The design follows
 one `Optimizer` that wraps inner solvers, with the algorithm and its
 options selected through optimizer attributes.
 
+## Installation
+
+DisjunctiveAlgorithms requires DisjunctiveProgramming v0.6.2, which is
+not registered yet: it lives on the `gdp_optimizer` branch (it adds
+`DisjunctionSet` and the `Direct()` reformulation). Until that release
+ships, install the branch first:
+
+```julia
+import Pkg
+Pkg.add(url = "https://github.com/dnguyen227/DisjunctiveProgramming.jl",
+    rev = "gdp_optimizer")
+Pkg.add(url = "https://github.com/infiniteopt/DisjunctiveAlgorithms.jl")
+```
+
 ## Usage with DisjunctiveProgramming.jl
 
 ```julia

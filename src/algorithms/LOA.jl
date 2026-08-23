@@ -43,6 +43,23 @@ end
 
 _default(::Algorithm) = LOA()
 
+# Attribute values that would explode mid-solve fail at set time
+# instead; attributes without a method to extend are unvalidated.
+_validate(::AbstractAlgorithmAttribute, value) = nothing
+
+function _validate(::MasterReformulation, value)
+    value in ("indicator", "bigm") || error(
+        "`MasterReformulation` must be \"indicator\" or \"bigm\" " *
+        "(got `$value`).")
+    return nothing
+end
+
+function _validate(::OASlack, value)
+    value > 0 ||
+        error("`OASlack` must be positive (got `$value`).")
+    return nothing
+end
+
 # An unset field (`nothing`) reads back as the attribute default.
 for (attr, field) in (
     (NumIterationLimit, :num_iteration_limit),
@@ -58,7 +75,8 @@ for (attr, field) in (
     )
     @eval begin
         MOI.supports(::LOA, ::$attr) = true
-        function MOI.set(algorithm::LOA, ::$attr, value)
+        function MOI.set(algorithm::LOA, attr::$attr, value)
+            _validate(attr, value)
             algorithm.$field = value
             return
         end
@@ -74,6 +92,14 @@ _is_better(sense::MOI.OptimizationSense, new, best) =
     sense == MOI.MAX_SENSE ? new > best : new < best
 _gap(sense::MOI.OptimizationSense, best, bound) =
     sense == MOI.MAX_SENSE ? bound - best : best - bound
+
+# The NLP fixes a feasible indicator combination, so an unbounded NLP
+# proves the whole model unbounded; only a genuine infeasibility
+# certificate lets a combination count toward exhaustion.
+_nlp_unbounded(status::MOI.TerminationStatusCode) =
+    status in (MOI.DUAL_INFEASIBLE, MOI.NORM_LIMIT)
+_nlp_infeasible(status::MOI.TerminationStatusCode) =
+    status in (MOI.INFEASIBLE, MOI.LOCALLY_INFEASIBLE)
 
 # one record per NLP solve, for convergence traces
 function _log_progress(
@@ -163,9 +189,20 @@ function _optimize!(algorithm::LOA, model::Optimizer)
     master_bound = nothing
     master_status = nothing
     converged = false
+    unbounded = false
+    num_unresolved = 0
 
     # Shared iteration tail: no-good cut, OA cuts, incumbent update.
+    # An unbounded NLP aborts the loops; a failed (neither feasible
+    # nor proven-infeasible) NLP still gets its no-good cut so the
+    # loop progresses, but is counted against the exhaustion claim.
     process_result = result -> begin
+        if !result.feasible && _nlp_unbounded(result.status)
+            unbounded = true
+            return
+        end
+        result.feasible || _nlp_infeasible(result.status) ||
+            (num_unresolved += 1)
         _avoid_combination(master, result.combination)
         _add_oa_cuts(model, problem, master, linearizer, result)
         if result.feasible &&
@@ -204,6 +241,7 @@ function _optimize!(algorithm::LOA, model::Optimizer)
         result = _solve_nlp(model, problem, subproblem, combination,
             warm_start(); deadline = loop_deadline)
         process_result(result)
+        unbounded && break
         # covered only once active in a feasible NLP; infeasible
         # combinations just leave their no-good cut
         if result.feasible
@@ -217,7 +255,7 @@ function _optimize!(algorithm::LOA, model::Optimizer)
     end
 
     # main loop: alpha_oa gives the bound, the NLP the incumbent
-    if master_status === nothing
+    if master_status === nothing && !unbounded
         for _ in 1:MOI.get(algorithm, NumIterationLimit())
             time() < loop_deadline || break
             _cap_remaining_time(master.model, loop_deadline)
@@ -245,11 +283,12 @@ function _optimize!(algorithm::LOA, model::Optimizer)
             result = _solve_nlp(model, problem, subproblem, combination,
                 warm_start(); deadline = loop_deadline)
             process_result(result)
+            unbounded && break
         end
     end
 
     _store_results(model, sense, best_objective, best_result, master_bound,
-        master_status, converged, loop_deadline)
+        master_status, converged, unbounded, num_unresolved, loop_deadline)
     model.solve_time = time() - t_start
     return
 end
@@ -267,21 +306,43 @@ function _store_results(
     master_bound,
     master_status,
     converged::Bool,
+    unbounded::Bool,
+    num_unresolved::Int,
     loop_deadline::Float64
     )
     timed_out = time() >= loop_deadline
+    if unbounded
+        model.termination_status = MOI.DUAL_INFEASIBLE
+        model.primal_status = MOI.NO_SOLUTION
+        model.objective_value = NaN
+        model.raw_status = "An NLP subproblem at a fixed indicator " *
+            "combination is unbounded, so the model is unbounded."
+        return
+    end
     if best_result === nothing
         model.primal_status = MOI.NO_SOLUTION
         model.objective_value = NaN
         model.raw_status = "No feasible incumbent found."
-        if master_status == MOI.INFEASIBLE
+        if master_status == MOI.INFEASIBLE && num_unresolved == 0
             model.termination_status = MOI.INFEASIBLE
             model.raw_status = "No feasible incumbent: the master " *
                 "problem is infeasible."
+        elseif master_status == MOI.INFEASIBLE
+            # exhaustion is not an infeasibility proof while some
+            # combination never solved to a certificate
+            model.termination_status = MOI.OTHER_LIMIT
+            model.raw_status = "No feasible incumbent: the master " *
+                "is infeasible, but $num_unresolved combination(s) " *
+                "failed without an infeasibility certificate."
         elseif timed_out
             model.termination_status = MOI.TIME_LIMIT
         elseif master_status === nothing
             model.termination_status = MOI.ITERATION_LIMIT
+        elseif master_status == MOI.DUAL_INFEASIBLE
+            model.termination_status = MOI.OTHER_LIMIT
+            model.raw_status = "No feasible incumbent: the master is " *
+                "unbounded (no OA cut bounds the objective yet); the " *
+                "model itself may be unbounded."
         else
             model.termination_status = MOI.OTHER_LIMIT
             model.raw_status = "No feasible incumbent: the master " *
@@ -294,21 +355,28 @@ function _store_results(
     model.objective_value = best_objective
     model.objective_bound = master_bound === nothing ? nothing :
         Float64(master_bound)
+    exhausted = master_status == MOI.INFEASIBLE && num_unresolved == 0
     if converged
         model.termination_status = MOI.LOCALLY_SOLVED
     elseif timed_out
         model.termination_status = MOI.TIME_LIMIT
-    elseif master_status == MOI.INFEASIBLE
+    elseif exhausted
         # all combinations visited; the incumbent is best over all
         # of them, but the OA bound is gone
         model.termination_status = MOI.LOCALLY_SOLVED
+    elseif master_status == MOI.INFEASIBLE
+        # visited, but some combination failed without a certificate,
+        # so the incumbent is not best over all of them
+        model.termination_status = MOI.OTHER_LIMIT
     elseif master_status !== nothing
         model.termination_status = MOI.OTHER_LIMIT
     else
         model.termination_status = MOI.ITERATION_LIMIT
     end
-    label = converged ? "converged" : (master_status == MOI.INFEASIBLE ?
-        "combinations exhausted" : "limit hit")
+    label = converged ? "converged" :
+        exhausted ? "combinations exhausted" :
+        master_status == MOI.INFEASIBLE ? "combinations exhausted, " *
+            "$num_unresolved unresolved" : "limit hit"
     if master_bound === nothing
         model.raw_status = "LOA finished [$label]: incumbent " *
             "$best_objective (master produced no bound)."

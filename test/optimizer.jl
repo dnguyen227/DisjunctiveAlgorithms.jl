@@ -122,6 +122,25 @@ function test_unsupported_constraint_type()
     @test_throws ErrorException MOI.optimize!(optimizer)
 end
 
+# Only the scalar objective functions the solve demotes are supported;
+# a vector objective is refused at set time. The solver version comes
+# from Project.toml, not a copy.
+function test_objective_function_support()
+    optimizer = DA.Optimizer(nothing)
+    @test MOI.supports(optimizer,
+        MOI.ObjectiveFunction{MOI.ScalarAffineFunction{Float64}}())
+    @test MOI.supports(optimizer,
+        MOI.ObjectiveFunction{MOI.ScalarNonlinearFunction}())
+    @test !MOI.supports(optimizer,
+        MOI.ObjectiveFunction{MOI.VectorAffineFunction{Float64}}())
+    x = MOI.add_variable(optimizer)
+    func = MOI.Utilities.operate(vcat, Float64, 1.0 * x, 2.0 * x)
+    attr = MOI.ObjectiveFunction{typeof(func)}()
+    @test_throws MOI.UnsupportedAttribute MOI.set(optimizer, attr, func)
+    @test MOI.get(optimizer, MOI.SolverVersion()) ==
+        string(pkgversion(DA))
+end
+
 @testset "Optimizer scaffold" begin
     test_optimizer_scaffold()
     test_optimizer_options()
@@ -129,4 +148,5 @@ end
     test_copy_to()
     test_moi_forwarding()
     test_unsupported_constraint_type()
+    test_objective_function_support()
 end

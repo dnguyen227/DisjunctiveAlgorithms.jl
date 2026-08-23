@@ -104,8 +104,6 @@ function _add_gated_rows(
     model::Optimizer
     )
     gating = MOI.get(model, MasterReformulation())
-    gating in ("indicator", "bigm") ||
-        error("Unknown `MasterReformulation` value `$gating`.")
     activate = disjunct.active_value ? MOI.ACTIVATE_ON_ONE :
         MOI.ACTIVATE_ON_ZERO
     binary = variable_map[disjunct.binary]

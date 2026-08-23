@@ -64,6 +64,21 @@ end
 _scalarize(func::MOI.AbstractVectorFunction) =
     collect(MOI.Utilities.eachscalar(func))
 
+function _indicator_error(func::MOI.AbstractScalarFunction)
+    return error("Unsupported indicator expression `$func`: each " *
+        "`DisjunctionSet` indicator must be a binary variable `z` or " *
+        "its complement `1 - z`.")
+end
+
+# An activation/indicator row must demote to an affine expression;
+# genuinely nonlinear rows get the curated error, not a raw convert
+# failure.
+function _activation_affine(row::MOI.AbstractScalarFunction)
+    demoted = _demote(row)
+    _is_linear(demoted) || _indicator_error(demoted)
+    return _to_affine(demoted)
+end
+
 # `z` -> (z, true), `1 - z` -> (z, false)
 function _activation_binary(activation::MOI.ScalarAffineFunction{Float64})
     canonical = MOI.Utilities.canonical(activation)
@@ -75,9 +90,7 @@ function _activation_binary(activation::MOI.ScalarAffineFunction{Float64})
             return term.variable, false
         end
     end
-    return error("Unsupported indicator expression `$activation`: each " *
-        "`DisjunctionSet` indicator must be a binary variable `z` or " *
-        "its complement `1 - z`.")
+    return _indicator_error(activation)
 end
 
 function _parse_disjunction(
@@ -86,11 +99,11 @@ function _parse_disjunction(
     ) where {F}
     set = MOI.get(cache, MOI.ConstraintSet(), ci)
     rows = _scalarize(MOI.get(cache, MOI.ConstraintFunction(), ci))
-    disjunction_activation = _to_affine(
-        _demote(rows[activation_index(set)]))
+    disjunction_activation = _activation_affine(
+        rows[activation_index(set)])
     disjuncts = _Disjunct[]
     for (i, j) in enumerate(indicator_indices(set))
-        activation = _to_affine(_demote(rows[j]))
+        activation = _activation_affine(rows[j])
         binary, active_value = _activation_binary(activation)
         zero_one = MOI.ConstraintIndex{MOI.VariableIndex, MOI.ZeroOne}(
             binary.value)

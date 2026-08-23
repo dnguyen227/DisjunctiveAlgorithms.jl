@@ -86,19 +86,20 @@ function _solve_nlp(
     _set_warm_start(sub.model, sub.variable_map, warm_start)
     _cap_remaining_time(sub.model, deadline)
     MOI.optimize!(sub.model)
+    status = MOI.get(sub.model, MOI.TerminationStatus())
     if _solved_and_feasible(sub.model)
         return (combination = combination,
             point = _extract_point(sub.model, problem, sub.variable_map),
             objective = MOI.get(sub.model, MOI.ObjectiveValue()),
-            feasible = true)
+            feasible = true, status = status)
     end
     if Bool(MOI.get(model, UseNLPF()))
         result = _solve_nlpf(model, problem, combination, warm_start;
             deadline = deadline)
-        result === nothing || return result
+        result === nothing || return (; result..., status = status)
     end
     return (combination = combination,
-        point = nothing, objective = Inf, feasible = false)
+        point = nothing, objective = Inf, feasible = false, status = status)
 end
 
 ################################################################################
