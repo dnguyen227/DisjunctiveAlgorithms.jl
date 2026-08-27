@@ -270,11 +270,20 @@ function _check_support(solver, name::String, destination::String, required)
 end
 
 # Fail before any subproblem work when an inner solver cannot take the
-# constraint types routed to it, naming the solver and the type.
-function _check_inner_support(model::Optimizer, problem::_Problem)
+# constraint types routed to it, naming the solver and the type. A
+# subproblem method brings its own solver, so only the `nothing`
+# (MOI-path) method checks the `nlp_solver`.
+function _check_inner_support(method, model::Optimizer, problem::_Problem)
     mip = _instantiate(model.mip_solver)
     _check_support(mip, "mip_solver", "master problem",
         _master_constraint_types(model, problem))
+    _check_nlp_support(method, model, problem)
+    return
+end
+
+_check_nlp_support(method, ::Optimizer, ::_Problem) = nothing
+
+function _check_nlp_support(::Nothing, model::Optimizer, problem::_Problem)
     nlp = _instantiate(model.nlp_solver)
     _check_support(nlp, "nlp_solver", "NLP subproblems",
         _nlp_constraint_types(model, problem))

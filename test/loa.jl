@@ -797,6 +797,48 @@ function test_inner_solver_support_check()
     @test occursin("mip_solver", err.msg)
 end
 
+# A `SubproblemMethod` object routes the support check, the build, and
+# every NLP solve through its own overloads; delegating back to the
+# `nothing` path must reproduce the MOI-path answer exactly.
+struct _RecordingSubproblems
+    log::Vector{Symbol}
+end
+
+DA._check_nlp_support(m::_RecordingSubproblems, ::DA.Optimizer,
+    ::DA._Problem) = push!(m.log, :check)
+
+function DA._build_subproblem(m::_RecordingSubproblems, model::DA.Optimizer,
+    problem::DA._Problem)
+    push!(m.log, :build)
+    return DA._build_subproblem(nothing, model, problem)
+end
+
+function DA._solve_nlp(m::_RecordingSubproblems, model::DA.Optimizer,
+    problem::DA._Problem, sub, combination, warm_start;
+    deadline::Float64 = Inf)
+    push!(m.log, :solve)
+    return DA._solve_nlp(nothing, model, problem, sub, combination,
+        warm_start; deadline)
+end
+
+function test_subproblem_method_dispatch()
+    method = _RecordingSubproblems(Symbol[])
+    model = Model(_loa_optimizer(DA.SubproblemMethod() => method))
+    set_silent(model)
+    @variable(model, 0 <= x <= 10)
+    @variable(model, z[1:2], Bin)
+    @constraint(model, [1, z[1], z[2], x, x] in DA.DisjunctionSet([
+        [MOI.GreaterThan(2.0)], [MOI.GreaterThan(5.0)]]))
+    @objective(model, Min, x)
+    optimize!(model)
+    @test termination_status(model) == MOI.LOCALLY_SOLVED
+    @test objective_value(model) ≈ 2.0 atol = 1e-5
+    @test method.log[1] == :check
+    @test method.log[2] == :build
+    @test count(==(:solve), method.log) >= 1
+    @test MOI.get(unsafe_backend(model), DA.SubproblemMethod()) === method
+end
+
 @testset "LOA loop" begin
     test_linear_disjunction()
     test_row_function_constants()
@@ -837,6 +879,7 @@ end
     test_reoptimize_resets_results()
     test_bridged_vector_constraint()
     test_inner_solver_support_check()
+    test_subproblem_method_dispatch()
 end
 
 @testset "LOA units" begin

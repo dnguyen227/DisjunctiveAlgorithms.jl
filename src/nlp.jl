@@ -1,6 +1,9 @@
 ################################################################################
 #                          NLP SUBPROBLEM
 ################################################################################
+# The MOI subproblem path dispatches on the `SubproblemMethod` value
+# `nothing`; a method object routes `_build_subproblem`/`_solve_nlp`
+# to its own construction (see the `SubproblemMethod` docstring).
 # Built once; each iteration overwrites the binary fixes in place
 # and swaps the active disjuncts' rows. No big-M anywhere.
 struct _Subproblem
@@ -11,7 +14,7 @@ struct _Subproblem
     rows::Vector{MOI.ConstraintIndex}
 end
 
-function _build_subproblem(model::Optimizer, problem::_Problem)
+function _build_subproblem(::Nothing, model::Optimizer, problem::_Problem)
     nlp = _instantiate(model.nlp_solver)
     variable_map = Dict{MOI.VariableIndex, MOI.VariableIndex}(
         vi => MOI.add_variable(nlp) for vi in problem.variables)
@@ -61,6 +64,7 @@ end
 # through to NLPF (a slacked version that always solves) so the master
 # still gets a linearization site, not just a no-good cut.
 function _solve_nlp(
+    ::Nothing,
     model::Optimizer,
     problem::_Problem,
     sub::_Subproblem,

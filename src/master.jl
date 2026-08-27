@@ -15,7 +15,8 @@ end
 function _instantiate(factory)
     solver = MOI.instantiate(factory;
         with_cache_type = Float64, with_bridge_type = Float64)
-    MOI.set(solver, MOI.Silent(), true)
+    MOI.supports(solver, MOI.Silent()) &&
+        MOI.set(solver, MOI.Silent(), true)
     return solver
 end
 
@@ -30,7 +31,8 @@ end
 
 function _cap_remaining_time(solver::MOI.ModelLike, deadline::Float64)
     isfinite(deadline) || return
-    MOI.set(solver, MOI.TimeLimitSec(), max(0.0, deadline - time()))
+    MOI.supports(solver, MOI.TimeLimitSec()) &&
+        MOI.set(solver, MOI.TimeLimitSec(), max(0.0, deadline - time()))
     return
 end
 

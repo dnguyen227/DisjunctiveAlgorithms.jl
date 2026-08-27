@@ -119,6 +119,21 @@ budget is the standard `MOI.TimeLimitSec` attribute.
 struct IterationTimeLimit <: AbstractAlgorithmAttribute end
 _default(::IterationTimeLimit) = Inf
 
+"""
+    SubproblemMethod() <: AbstractAlgorithmAttribute -> Any
+
+How the NLP subproblems are built and solved. The default `nothing`
+builds one MOI model from the `nlp_solver` and rewrites its binary
+fixes and disjunct rows per combination. A method object routes the
+subproblems elsewhere (e.g. a structure-preserving transcription of
+the original model): it must extend `_build_subproblem` and
+`_solve_nlp` on its type, and may extend `_check_nlp_support`.
+`_solve_nlp` must return `(; combination, point, objective, feasible,
+status)` with `point` indexed by this optimizer's variable indices.
+"""
+struct SubproblemMethod <: AbstractAlgorithmAttribute end
+_default(::SubproblemMethod) = nothing
+
 ################################################################################
 #                                OPTIMIZER
 ################################################################################

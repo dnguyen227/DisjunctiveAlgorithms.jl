@@ -24,6 +24,7 @@ never `OPTIMAL`.
 - [`ConvergenceTolerance`](@ref)
 - [`SlackTolerance`](@ref)
 - [`IterationTimeLimit`](@ref)
+- [`SubproblemMethod`](@ref)
 """
 mutable struct LOA <: AbstractAlgorithm
     num_iteration_limit::Union{Nothing, Int}
@@ -36,9 +37,10 @@ mutable struct LOA <: AbstractAlgorithm
     convergence_tolerance::Union{Nothing, Float64}
     slack_tolerance::Union{Nothing, Float64}
     iteration_time_limit::Union{Nothing, Float64}
+    subproblem_method::Any
 
     LOA() = new(nothing, nothing, nothing, nothing, nothing, nothing,
-        nothing, nothing, nothing, nothing)
+        nothing, nothing, nothing, nothing, nothing)
 end
 
 _default(::Algorithm) = LOA()
@@ -85,6 +87,15 @@ for (attr, field) in (
         end
     end
 end
+
+# `nothing` is this attribute's default, so it skips the
+# `something`-based fallback the loop above generates
+MOI.supports(::LOA, ::SubproblemMethod) = true
+function MOI.set(algorithm::LOA, ::SubproblemMethod, value)
+    algorithm.subproblem_method = value
+    return
+end
+MOI.get(algorithm::LOA, ::SubproblemMethod) = algorithm.subproblem_method
 
 _worst_objective(sense::MOI.OptimizationSense) =
     sense == MOI.MAX_SENSE ? -Inf : Inf
@@ -174,9 +185,10 @@ function _optimize!(algorithm::LOA, model::Optimizer)
     t_start = time()
     _reset_results(model)
     problem = _build_problem(model)
-    _check_inner_support(model, problem)
+    method = MOI.get(algorithm, SubproblemMethod())
+    _check_inner_support(method, model, problem)
     master = _build_master(model, problem)
-    subproblem = _build_subproblem(model, problem)
+    subproblem = _build_subproblem(method, model, problem)
     linearizer = _Linearizer()
     sense = problem.sense
     overall_deadline = t_start + something(model.time_limit_sec, Inf)
@@ -238,8 +250,8 @@ function _optimize!(algorithm::LOA, model::Optimizer)
             master_status = status
             break
         end
-        result = _solve_nlp(model, problem, subproblem, combination,
-            warm_start(); deadline = loop_deadline)
+        result = _solve_nlp(method, model, problem, subproblem,
+            combination, warm_start(); deadline = loop_deadline)
         process_result(result)
         unbounded && break
         # covered only once active in a feasible NLP; infeasible
@@ -280,8 +292,8 @@ function _optimize!(algorithm::LOA, model::Optimizer)
                 end
             end
             combination = _extract_combination(problem, master)
-            result = _solve_nlp(model, problem, subproblem, combination,
-                warm_start(); deadline = loop_deadline)
+            result = _solve_nlp(method, model, problem, subproblem,
+                combination, warm_start(); deadline = loop_deadline)
             process_result(result)
             unbounded && break
         end
