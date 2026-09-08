@@ -43,22 +43,33 @@ end
 _as_row(func::MOI.VariableIndex) = _to_affine(func)
 _as_row(func::MOI.AbstractScalarFunction) = func
 
+# Polynomial degree of an operator tree built from +, -, * and ^;
+# `nothing` for any other operator. Promoted affine and quadratic rows
+# only use these, so the degree says which MOI type they convert to.
+_degree(::Real) = 0
+_degree(::MOI.VariableIndex) = 1
+_degree(::MOI.ScalarAffineFunction) = 1
+_degree(::MOI.ScalarQuadraticFunction) = 2
+function _degree(func::MOI.ScalarNonlinearFunction)
+    degrees = [_degree(arg) for arg in func.args]
+    any(isnothing, degrees) && return nothing
+    func.head in (:+, :-) && return maximum(degrees)
+    func.head == :* && return sum(degrees)
+    func.head == :^ && func.args[2] isa Real &&
+        return degrees[1] * func.args[2]
+    return nothing
+end
+
 # demote rows the enclosing vector function promoted
 _demote(func::MOI.AbstractScalarFunction) = func
 function _demote(func::MOI.ScalarQuadraticFunction{Float64})
-    return _try_convert(MOI.ScalarAffineFunction{Float64}, func)
+    return isempty(func.quadratic_terms) ? _to_affine(func) : func
 end
 function _demote(func::MOI.ScalarNonlinearFunction)
-    return _try_convert(MOI.ScalarAffineFunction{Float64},
-        _try_convert(MOI.ScalarQuadraticFunction{Float64}, func))
-end
-
-function _try_convert(T::Type, func)
-    return try
-        convert(T, func)
-    catch
-        func
-    end
+    degree = _degree(func)
+    degree in (0, 1) && return _to_affine(func)
+    degree == 2 && return convert(MOI.ScalarQuadraticFunction{Float64}, func)
+    return func
 end
 
 _scalarize(func::MOI.AbstractVectorFunction) =
@@ -261,10 +272,10 @@ end
 # Fail before any subproblem work when an inner solver cannot take the
 # constraint types routed to it, naming the solver and the type.
 function _check_inner_support(model::Optimizer, problem::_Problem)
-    mip = _instantiate(model.mip_solver, "mip_solver")
+    mip = _instantiate(model.mip_solver)
     _check_support(mip, "mip_solver", "master problem",
         _master_constraint_types(model, problem))
-    nlp = _instantiate(model.nlp_solver, "nlp_solver")
+    nlp = _instantiate(model.nlp_solver)
     _check_support(nlp, "nlp_solver", "NLP subproblems",
         _nlp_constraint_types(model, problem))
     F = typeof(problem.objective)

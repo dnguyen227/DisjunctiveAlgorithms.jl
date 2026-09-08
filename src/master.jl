@@ -12,9 +12,7 @@ mutable struct _Master
     oa_objective::MOI.ScalarAffineFunction{Float64}
 end
 
-function _instantiate(factory, name::String)
-    factory === nothing &&
-        error("DisjunctiveAlgorithms requires the `$name` optimizer factory.")
+function _instantiate(factory)
     solver = MOI.instantiate(factory;
         with_cache_type = Float64, with_bridge_type = Float64)
     MOI.set(solver, MOI.Silent(), true)
@@ -37,7 +35,7 @@ function _cap_remaining_time(solver::MOI.ModelLike, deadline::Float64)
 end
 
 function _build_master(model::Optimizer, problem::_Problem)
-    mip = _instantiate(model.mip_solver, "mip_solver")
+    mip = _instantiate(model.mip_solver)
     variable_map = Dict{MOI.VariableIndex, MOI.VariableIndex}(
         vi => MOI.add_variable(mip) for vi in problem.variables)
     for ci in problem.variable_cis

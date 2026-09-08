@@ -12,7 +12,7 @@ struct _Subproblem
 end
 
 function _build_subproblem(model::Optimizer, problem::_Problem)
-    nlp = _instantiate(model.nlp_solver, "nlp_solver")
+    nlp = _instantiate(model.nlp_solver)
     variable_map = Dict{MOI.VariableIndex, MOI.VariableIndex}(
         vi => MOI.add_variable(nlp) for vi in problem.variables)
     indicators = Set(problem.binaries)
@@ -121,7 +121,7 @@ function _solve_nlpf(
     warm_start;
     deadline::Float64 = Inf
     )
-    nlp = _instantiate(model.nlp_solver, "nlp_solver")
+    nlp = _instantiate(model.nlp_solver)
     variable_map = Dict{MOI.VariableIndex, MOI.VariableIndex}(
         vi => MOI.add_variable(nlp) for vi in problem.variables)
     u = MOI.add_variable(nlp)
