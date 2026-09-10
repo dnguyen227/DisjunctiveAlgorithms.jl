@@ -171,6 +171,14 @@ end
 _algorithm(model::Optimizer) =
     something(model.algorithm, _default(Algorithm()))
 
+# Realize an inner solver factory, bridged and silenced.
+function _instantiate(factory)
+    solver = MOI.instantiate(factory;
+        with_cache_type = Float64, with_bridge_type = Float64)
+    MOI.set(solver, MOI.Silent(), true)
+    return solver
+end
+
 MOI.get(::Optimizer, ::MOI.SolverName) = "DisjunctiveAlgorithms"
 MOI.get(::Optimizer, ::MOI.SolverVersion) = string(pkgversion(@__MODULE__))
 

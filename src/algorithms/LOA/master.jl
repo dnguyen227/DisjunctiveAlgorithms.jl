@@ -12,13 +12,6 @@ mutable struct _Master
     oa_objective::MOI.ScalarAffineFunction{Float64}
 end
 
-function _instantiate(factory)
-    solver = MOI.instantiate(factory;
-        with_cache_type = Float64, with_bridge_type = Float64)
-    MOI.set(solver, MOI.Silent(), true)
-    return solver
-end
-
 _map_to(variable_map::AbstractDict, func) =
     MOI.Utilities.map_indices(vi -> variable_map[vi], func)
 
