@@ -120,6 +120,21 @@ struct IterationTimeLimit <: AbstractAlgorithmAttribute end
 _default(::IterationTimeLimit) = Inf
 
 """
+    MultiGenerationSize() <: AbstractAlgorithmAttribute -> Int
+
+Indicator combinations evaluated per master solve in the main loop
+(multi-generation cuts). Defaults to `1`, plain LOA. Extra
+combinations come from the master's solution pool when the
+`mip_solver` exposes one through `MOI.ResultCount` (Gurobi with
+`PoolSolutions`), and otherwise from re-solving the master behind a
+no-good cut per combination already taken. All of them go through
+`_solve_nlps`, one stacked NLP under [`BatchedSubproblems`](@ref), and
+every result adds its cuts before the next master solve.
+"""
+struct MultiGenerationSize <: AbstractAlgorithmAttribute end
+_default(::MultiGenerationSize) = 1
+
+"""
     SubproblemMethod() <: AbstractAlgorithmAttribute -> Any
 
 How the NLP subproblems are built and solved. The default `nothing`
@@ -174,13 +189,15 @@ mutable struct Optimizer <: MOI.AbstractOptimizer
     relative_gap::Float64
     raw_status::String
     solve_time::Float64
+    num_master_solves::Int
+    num_nlp_solves::Int
 end
 
 function Optimizer(nlp_solver, mip_solver = nlp_solver)
     return Optimizer(nlp_solver, mip_solver,
         MOI.Utilities.UniversalFallback(MOI.Utilities.Model{Float64}()),
         nothing, 3600.0, false, MOI.OPTIMIZE_NOT_CALLED, MOI.NO_SOLUTION,
-        Dict{MOI.VariableIndex, Float64}(), NaN, nothing, NaN, "", NaN)
+        Dict{MOI.VariableIndex, Float64}(), NaN, nothing, NaN, "", NaN, 0, 0)
 end
 
 _algorithm(model::Optimizer) =
@@ -209,6 +226,8 @@ function _reset_results(model::Optimizer)
     model.relative_gap = NaN
     model.raw_status = ""
     model.solve_time = NaN
+    model.num_master_solves = 0
+    model.num_nlp_solves = 0
     return
 end
 
@@ -465,6 +484,26 @@ end
 MOI.get(model::Optimizer, ::MOI.TerminationStatus) = model.termination_status
 
 MOI.get(model::Optimizer, ::MOI.RawStatusString) = model.raw_status
+
+"""
+    MasterSolveCount() <: MOI.AbstractModelAttribute -> Int
+
+Master MILP solves in the last `optimize!`, including the set-covering
+pass and any pool-replacement re-solves.
+"""
+struct MasterSolveCount <: MOI.AbstractModelAttribute end
+
+"""
+    NLPSolveCount() <: MOI.AbstractModelAttribute -> Int
+
+Indicator combinations evaluated by NLP subproblems in the last
+`optimize!`; a stacked batch of `k` counts `k`.
+"""
+struct NLPSolveCount <: MOI.AbstractModelAttribute end
+
+MOI.is_set_by_optimize(::Union{MasterSolveCount, NLPSolveCount}) = true
+MOI.get(model::Optimizer, ::MasterSolveCount) = model.num_master_solves
+MOI.get(model::Optimizer, ::NLPSolveCount) = model.num_nlp_solves
 
 function MOI.get(model::Optimizer, ::MOI.ResultCount)
     return model.primal_status == MOI.NO_SOLUTION ? 0 : 1

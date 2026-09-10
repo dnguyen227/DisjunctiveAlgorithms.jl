@@ -70,6 +70,111 @@ function test_quadratic_row_shapes()
     @test value(x) * value(y) >= 4.0 - 1e-5
 end
 
+# min x + y over [x >= 3] v [x <= 1] and [y >= x^2 + 1] v [y >= exp(x)]
+# with 0 <= x <= 4, 0 <= y <= 10: optimum 1 at (0, 1); the combination
+# (x >= 3, y >= exp(x)) is infeasible because exp(3) > 10.
+function _batched_test_model(attrs::Pair...)
+    model = Model(_loa_optimizer(attrs...))
+    set_silent(model)
+    @variable(model, 0 <= x <= 4)
+    @variable(model, 0 <= y <= 10)
+    @variable(model, z[1:2], Bin)
+    @variable(model, w[1:2], Bin)
+    @constraint(model, [1, z[1], z[2], x, x] in DA.DisjunctionSet([
+        [MOI.GreaterThan(3.0)], [MOI.LessThan(1.0)]]))
+    @constraint(model, [1, w[1], w[2], y - x^2, y - exp(x)] in
+        DA.DisjunctionSet([[MOI.GreaterThan(1.0)], [MOI.GreaterThan(0.0)]]))
+    @objective(model, Min, x + y)
+    return model, x, y
+end
+
+# every combination that activates exactly one disjunct per disjunction
+function _all_combinations(problem::DA._Problem)
+    choices = Iterators.product((disjunction.disjuncts
+        for disjunction in problem.disjunctions)...)
+    return map(vec(collect(choices))) do active
+        combination = Dict{MOI.VariableIndex, Bool}()
+        for disjunction in problem.disjunctions,
+                disjunct in disjunction.disjuncts
+            combination[disjunct.binary] = disjunct in active ?
+                disjunct.active_value : !disjunct.active_value
+        end
+        return combination
+    end
+end
+
+function test_batched_subproblems_loa()
+    model, x, y = _batched_test_model(
+        DA.SubproblemMethod() => DA.BatchedSubproblems())
+    optimize!(model)
+    @test termination_status(model) == MOI.LOCALLY_SOLVED
+    @test objective_value(model) ≈ 1.0 atol = 1e-4
+    @test value(x) ≈ 0.0 atol = 1e-4
+    @test value(y) ≈ 1.0 atol = 1e-4
+end
+
+# The stacked solve must reproduce the sequential results, and a batch
+# with an infeasible copy must fall back to them exactly.
+function test_batched_matches_sequential()
+    model, _, _ = _batched_test_model()
+    optimize!(model)
+    optimizer = unsafe_backend(model)
+    problem = DA._build_problem(optimizer)
+    batched = DA.BatchedSubproblems()
+    sub = DA._build_subproblem(batched, optimizer, problem)
+    combinations = _all_combinations(problem)
+    @test length(combinations) == 4
+    sequential = DA._solve_nlps(nothing, optimizer, problem, sub.sequential,
+        combinations, nothing)
+    @test count(r -> r.feasible, sequential) == 3
+    feasible = [c for (c, r) in zip(combinations, sequential) if r.feasible]
+    stacked = DA._solve_nlps(batched, optimizer, problem, sub, feasible,
+        nothing)
+    expected = [r for r in sequential if r.feasible]
+    @test all(r.feasible for r in stacked)
+    @test all(r.status == MOI.LOCALLY_SOLVED for r in stacked)
+    for (r, e) in zip(stacked, expected)
+        @test r.combination === e.combination
+        @test r.objective ≈ e.objective atol = 1e-5
+        for (vi, value) in e.point
+            @test r.point[vi] ≈ value atol = 1e-4
+        end
+    end
+    # the stacked feasibility pass classifies the copies and gives the
+    # infeasible one a restoration point instead of dropping it
+    mixed = DA._solve_nlps(batched, optimizer, problem, sub, combinations,
+        nothing)
+    for (r, e) in zip(mixed, sequential)
+        @test r.feasible == e.feasible
+        @test r.point !== nothing
+        r.feasible && @test r.objective ≈ e.objective atol = 1e-5
+        r.feasible || @test r.status == MOI.LOCALLY_INFEASIBLE
+    end
+end
+
+# Two combinations per master solve through the no-good re-solve path
+# (HiGHS has no solution pool); same optimum, fewer master solves than
+# NLP solves.
+function test_multi_generation_cuts()
+    model, x, y = _batched_test_model(DA.MultiGenerationSize() => 2)
+    optimize!(model)
+    @test termination_status(model) == MOI.LOCALLY_SOLVED
+    @test objective_value(model) ≈ 1.0 atol = 1e-4
+    @test value(x) ≈ 0.0 atol = 1e-4
+    optimizer = unsafe_backend(model)
+    @test MOI.get(optimizer, DA.NLPSolveCount()) >= 2
+    @test MOI.get(optimizer, DA.MasterSolveCount()) >= 1
+    @test MOI.get(model, DA.NLPSolveCount()) ==
+        MOI.get(optimizer, DA.NLPSolveCount())
+    stacked, _, _ = _batched_test_model(DA.MultiGenerationSize() => 2,
+        DA.SubproblemMethod() => DA.BatchedSubproblems())
+    optimize!(stacked)
+    @test objective_value(stacked) ≈ 1.0 atol = 1e-4
+    @test_throws ErrorException MOI.set(DA.LOA(), DA.MultiGenerationSize(), 0)
+    @test_throws ErrorException MOI.set(DA.LOA(), DA.MultiGenerationSize(),
+        1.5)
+end
+
 function test_quadratic_objective()
     model = Model(_loa_optimizer())
     set_silent(model)
@@ -867,6 +972,9 @@ end
     test_nested_disjunction()
     test_nested_disjunction_vacuous()
     test_quadratic_row_shapes()
+    test_batched_subproblems_loa()
+    test_batched_matches_sequential()
+    test_multi_generation_cuts()
     test_quadratic_objective()
     test_max_sense_linear()
     test_two_disjunctions()

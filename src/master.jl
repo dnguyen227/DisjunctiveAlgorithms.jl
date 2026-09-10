@@ -153,10 +153,10 @@ function _add_penalized_slack(
 end
 
 # round to Bool; MILP values are only within integer tolerance
-function _extract_combination(problem::_Problem, master::_Master)
+function _extract_combination(problem::_Problem, master::_Master, index = 1)
     return Dict{MOI.VariableIndex, Bool}(
-        binary => round(Bool, MOI.get(master.model, MOI.VariablePrimal(),
-            master.variable_map[binary]))
+        binary => round(Bool, MOI.get(master.model,
+            MOI.VariablePrimal(index), master.variable_map[binary]))
         for binary in problem.binaries)
 end
 
