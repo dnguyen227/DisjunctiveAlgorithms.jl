@@ -37,6 +37,10 @@ _to_affine(func::MOI.ScalarAffineFunction{Float64}) = func
 function _to_affine(func::MOI.AbstractScalarFunction)
     return convert(MOI.ScalarAffineFunction{Float64}, func)
 end
+function _to_affine(constant::Real)
+    return MOI.ScalarAffineFunction(MOI.ScalarAffineTerm{Float64}[],
+        Float64(constant))
+end
 
 # a raw `VariableIndex` row becomes a bound and collides with the
 # variable's own bounds in the subproblem
@@ -60,6 +64,32 @@ function _degree(func::MOI.ScalarNonlinearFunction)
     return nothing
 end
 
+# Evaluate a degree <= 2 operator tree into the matching typed
+# function. MOI's own `convert` is documented as rough-and-ready: it
+# reads a two-argument `*` as coefficient times variable and rejects
+# `-`, so promoted rows such as `x * y` or `x * y - 3` throw there.
+_polynomial(func::Real) = Float64(func)
+_polynomial(func::MOI.VariableIndex) = _to_affine(func)
+_polynomial(func::MOI.AbstractScalarFunction) = func
+function _polynomial(func::MOI.ScalarNonlinearFunction)
+    args = [_polynomial(arg) for arg in func.args]
+    if func.head == :^
+        base, exponent = args
+        base isa Real && return base^exponent
+        exponent == 0 && return 1.0
+        exponent == 1 && return base
+        return MOI.Utilities.operate(*, Float64, base, base)
+    end
+    op = func.head == :+ ? (+) : func.head == :- ? (-) : (*)
+    length(args) == 1 && return _combine(op, args[1])
+    return foldl((a, b) -> _combine(op, a, b), args)
+end
+
+_combine(op, a::Real) = op(a)
+_combine(op, a) = MOI.Utilities.operate(op, Float64, a)
+_combine(op, a::Real, b::Real) = op(a, b)
+_combine(op, a, b) = MOI.Utilities.operate(op, Float64, a, b)
+
 # demote rows the enclosing vector function promoted
 _demote(func::MOI.AbstractScalarFunction) = func
 function _demote(func::MOI.ScalarQuadraticFunction{Float64})
@@ -67,8 +97,8 @@ function _demote(func::MOI.ScalarQuadraticFunction{Float64})
 end
 function _demote(func::MOI.ScalarNonlinearFunction)
     degree = _degree(func)
-    degree in (0, 1) && return _to_affine(func)
-    degree == 2 && return convert(MOI.ScalarQuadraticFunction{Float64}, func)
+    degree in (0, 1) && return _to_affine(_polynomial(func))
+    degree == 2 && return _demote(_polynomial(func))
     return func
 end
 

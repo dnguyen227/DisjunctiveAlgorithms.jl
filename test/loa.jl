@@ -48,6 +48,28 @@ end
 
 # Convex quadratic objective over linear disjuncts: y >= x or
 # y >= 2 - x. The optimum sits at x = 3, y = 0 in disjunct 2.
+# Promoted rows reach DA as operator trees in the shapes JuMP emits:
+# a bare `x * y` and a `-` node. MOI's own quadratic `convert` throws
+# on both; `_demote` must not.
+function test_quadratic_row_shapes()
+    model = Model(_loa_optimizer())
+    set_silent(model)
+    @variable(model, 0 <= x <= 10, start = 1)
+    @variable(model, 0 <= y <= 10, start = 1)
+    @variable(model, z[1:2], Bin)
+    product = NonlinearExpr(:*, Any[x, y])
+    shifted = NonlinearExpr(:-, Any[NonlinearExpr(:*, Any[x, y]), 3.0])
+    @constraint(model, [1, z[1], z[2], product, shifted] in
+        DA.DisjunctionSet([
+            [MOI.GreaterThan(4.0)], [MOI.GreaterThan(6.0)]]))
+    @objective(model, Min, x + y)
+    optimize!(model)
+    @test termination_status(model) == MOI.LOCALLY_SOLVED
+    @test objective_value(model) ≈ 4.0 atol = 1e-4
+    @test value(z[1]) ≈ 1.0 atol = 1e-5
+    @test value(x) * value(y) >= 4.0 - 1e-5
+end
+
 function test_quadratic_objective()
     model = Model(_loa_optimizer())
     set_silent(model)
@@ -844,6 +866,7 @@ end
     test_row_function_constants()
     test_nested_disjunction()
     test_nested_disjunction_vacuous()
+    test_quadratic_row_shapes()
     test_quadratic_objective()
     test_max_sense_linear()
     test_two_disjunctions()
