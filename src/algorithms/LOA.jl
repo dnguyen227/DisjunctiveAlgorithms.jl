@@ -24,6 +24,7 @@ never `OPTIMAL`.
 - [`ConvergenceTolerance`](@ref)
 - [`SlackTolerance`](@ref)
 - [`IterationTimeLimit`](@ref)
+- [`MultiGenerationSize`](@ref)
 - [`SubproblemMethod`](@ref)
 """
 mutable struct LOA <: AbstractAlgorithm
@@ -37,10 +38,11 @@ mutable struct LOA <: AbstractAlgorithm
     convergence_tolerance::Union{Nothing, Float64}
     slack_tolerance::Union{Nothing, Float64}
     iteration_time_limit::Union{Nothing, Float64}
+    multi_generation_size::Union{Nothing, Int}
     subproblem_method::Any
 
     LOA() = new(nothing, nothing, nothing, nothing, nothing, nothing,
-        nothing, nothing, nothing, nothing, nothing)
+        nothing, nothing, nothing, nothing, nothing, nothing)
 end
 
 _default(::Algorithm) = LOA()
@@ -62,6 +64,12 @@ function _validate(::OASlack, value)
     return nothing
 end
 
+function _validate(::MultiGenerationSize, value)
+    value isa Integer && value >= 1 || error("`MultiGenerationSize` " *
+        "must be a positive integer (got `$value`).")
+    return nothing
+end
+
 # An unset field (`nothing`) reads back as the attribute default.
 for (attr, field) in (
     (NumIterationLimit, :num_iteration_limit),
@@ -74,6 +82,7 @@ for (attr, field) in (
     (ConvergenceTolerance, :convergence_tolerance),
     (SlackTolerance, :slack_tolerance),
     (IterationTimeLimit, :iteration_time_limit),
+    (MultiGenerationSize, :multi_generation_size),
     )
     @eval begin
         MOI.supports(::LOA, ::$attr) = true
@@ -170,6 +179,44 @@ function _user_start_values(model::Optimizer, problem::_Problem)
     return isempty(point) ? nothing : (point = point,)
 end
 
+function _solve_master(model::Optimizer, master::_Master, deadline::Float64)
+    _cap_remaining_time(master.model, deadline)
+    MOI.optimize!(master.model)
+    model.num_master_solves += 1
+    return _solved_and_feasible(master.model)
+end
+
+# The master's solution pool first (result indices past 1), then
+# re-solves behind a no-good cut for whatever the pool did not supply.
+# Those cuts are the ones `process_result` would add later, so the
+# second return value tells the caller to skip them.
+function _extract_combinations(
+    model::Optimizer,
+    problem::_Problem,
+    master::_Master,
+    count::Int,
+    deadline::Float64
+    )
+    combinations = [_extract_combination(problem, master)]
+    for index in 2:min(count, MOI.get(master.model, MOI.ResultCount()))
+        combination = _extract_combination(problem, master, index)
+        combination in combinations || push!(combinations, combination)
+    end
+    excluded = false
+    while length(combinations) < count && time() < deadline
+        if !excluded
+            foreach(c -> _avoid_combination(master, c), combinations)
+            excluded = true
+        end
+        _solve_master(model, master, deadline) || break
+        combination = _extract_combination(problem, master)
+        combination in combinations && break
+        push!(combinations, combination)
+        _avoid_combination(master, combination)
+    end
+    return combinations, excluded
+end
+
 function _set_master_objective(master::_Master, sense, objective)
     MOI.set(master.model, MOI.ObjectiveSense(), sense)
     MOI.set(master.model,
@@ -208,14 +255,14 @@ function _optimize!(algorithm::LOA, model::Optimizer)
     # An unbounded NLP aborts the loops; a failed (neither feasible
     # nor proven-infeasible) NLP still gets its no-good cut so the
     # loop progresses, but is counted against the exhaustion claim.
-    process_result = result -> begin
+    process_result = (result; nogood = true) -> begin
         if !result.feasible && _nlp_unbounded(result.status)
             unbounded = true
             return
         end
         result.feasible || _nlp_infeasible(result.status) ||
             (num_unresolved += 1)
-        _avoid_combination(master, result.combination)
+        nogood && _avoid_combination(master, result.combination)
         _add_oa_cuts(model, problem, master, linearizer, result)
         if result.feasible &&
                 _is_better(sense, result.objective, best_objective)
@@ -239,9 +286,7 @@ function _optimize!(algorithm::LOA, model::Optimizer)
         time() < loop_deadline || break
         _set_master_objective(master, MOI.MAX_SENSE,
             _cover_objective(master, cover, needs_cover, num_covered))
-        _cap_remaining_time(master.model, loop_deadline)
-        MOI.optimize!(master.model)
-        solved = _solved_and_feasible(master.model)
+        solved = _solve_master(model, master, loop_deadline)
         # capture the status before the objective restore invalidates it
         status = MOI.get(master.model, MOI.TerminationStatus())
         combination = solved ? _extract_combination(problem, master) : nothing
@@ -252,6 +297,7 @@ function _optimize!(algorithm::LOA, model::Optimizer)
         end
         result = _solve_nlp(method, model, problem, subproblem,
             combination, warm_start(); deadline = loop_deadline)
+        model.num_nlp_solves += 1
         process_result(result)
         unbounded && break
         # covered only once active in a feasible NLP; infeasible
@@ -270,9 +316,7 @@ function _optimize!(algorithm::LOA, model::Optimizer)
     if master_status === nothing && !unbounded
         for _ in 1:MOI.get(algorithm, NumIterationLimit())
             time() < loop_deadline || break
-            _cap_remaining_time(master.model, loop_deadline)
-            MOI.optimize!(master.model)
-            if !_solved_and_feasible(master.model)
+            if !_solve_master(model, master, loop_deadline)
                 master_status = MOI.get(master.model, MOI.TerminationStatus())
                 break
             end
@@ -291,10 +335,16 @@ function _optimize!(algorithm::LOA, model::Optimizer)
                     break
                 end
             end
-            combination = _extract_combination(problem, master)
-            result = _solve_nlp(method, model, problem, subproblem,
-                combination, warm_start(); deadline = loop_deadline)
-            process_result(result)
+            combinations, excluded = _extract_combinations(model, problem,
+                master, MOI.get(algorithm, MultiGenerationSize()),
+                loop_deadline)
+            results = _solve_nlps(method, model, problem, subproblem,
+                combinations, warm_start(); deadline = loop_deadline)
+            model.num_nlp_solves += length(results)
+            for result in results
+                process_result(result; nogood = !excluded)
+                unbounded && break
+            end
             unbounded && break
         end
     end
