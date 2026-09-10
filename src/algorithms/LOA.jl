@@ -25,6 +25,7 @@ never `OPTIMAL`.
 - [`SlackTolerance`](@ref)
 - [`IterationTimeLimit`](@ref)
 - [`MultiGenerationSize`](@ref)
+- [`CombinationSource`](@ref)
 - [`SubproblemMethod`](@ref)
 """
 mutable struct LOA <: AbstractAlgorithm
@@ -39,10 +40,11 @@ mutable struct LOA <: AbstractAlgorithm
     slack_tolerance::Union{Nothing, Float64}
     iteration_time_limit::Union{Nothing, Float64}
     multi_generation_size::Union{Nothing, Int}
+    combination_source::Any
     subproblem_method::Any
 
     LOA() = new(nothing, nothing, nothing, nothing, nothing, nothing,
-        nothing, nothing, nothing, nothing, nothing, nothing)
+        nothing, nothing, nothing, nothing, nothing, nothing, nothing)
 end
 
 _default(::Algorithm) = LOA()
@@ -97,7 +99,7 @@ for (attr, field) in (
     end
 end
 
-# `nothing` is this attribute's default, so it skips the
+# `nothing` is these attributes' default, so they skip the
 # `something`-based fallback the loop above generates
 MOI.supports(::LOA, ::SubproblemMethod) = true
 function MOI.set(algorithm::LOA, ::SubproblemMethod, value)
@@ -105,6 +107,13 @@ function MOI.set(algorithm::LOA, ::SubproblemMethod, value)
     return
 end
 MOI.get(algorithm::LOA, ::SubproblemMethod) = algorithm.subproblem_method
+
+MOI.supports(::LOA, ::CombinationSource) = true
+function MOI.set(algorithm::LOA, ::CombinationSource, value)
+    algorithm.combination_source = value
+    return
+end
+MOI.get(algorithm::LOA, ::CombinationSource) = algorithm.combination_source
 
 _worst_objective(sense::MOI.OptimizationSense) =
     sense == MOI.MAX_SENSE ? -Inf : Inf
@@ -186,35 +195,24 @@ function _solve_master(model::Optimizer, master::_Master, deadline::Float64)
     return _solved_and_feasible(master.model)
 end
 
-# The master's solution pool first (result indices past 1), then
-# re-solves behind a no-good cut for whatever the pool did not supply.
-# Those cuts are the ones `process_result` would add later, so the
-# second return value tells the caller to skip them.
+# The master's proposal plus up to `count - 1` more from the
+# `CombinationSource`. The second return value says whether the source
+# already added the no-good cuts (re-solving sources must), so the
+# caller skips them.
 function _extract_combinations(
+    source,
     model::Optimizer,
     problem::_Problem,
     master::_Master,
+    incumbent,
     count::Int,
     deadline::Float64
     )
-    combinations = [_extract_combination(problem, master)]
-    for index in 2:min(count, MOI.get(master.model, MOI.ResultCount()))
-        combination = _extract_combination(problem, master, index)
-        combination in combinations || push!(combinations, combination)
-    end
-    excluded = false
-    while length(combinations) < count && time() < deadline
-        if !excluded
-            foreach(c -> _avoid_combination(master, c), combinations)
-            excluded = true
-        end
-        _solve_master(model, master, deadline) || break
-        combination = _extract_combination(problem, master)
-        combination in combinations && break
-        push!(combinations, combination)
-        _avoid_combination(master, combination)
-    end
-    return combinations, excluded
+    proposal = _extract_combination(problem, master)
+    count > 1 || return [proposal], false
+    extra, excluded = _candidate_combinations(source, model, problem,
+        master, proposal, incumbent, count - 1, deadline)
+    return [proposal; extra], excluded
 end
 
 function _set_master_objective(master::_Master, sense, objective)
@@ -335,9 +333,11 @@ function _optimize!(algorithm::LOA, model::Optimizer)
                     break
                 end
             end
-            combinations, excluded = _extract_combinations(model, problem,
-                master, MOI.get(algorithm, MultiGenerationSize()),
-                loop_deadline)
+            combinations, excluded = _extract_combinations(
+                MOI.get(algorithm, CombinationSource()), model, problem,
+                master, best_result === nothing ? nothing :
+                    best_result.combination,
+                MOI.get(algorithm, MultiGenerationSize()), loop_deadline)
             results = _solve_nlps(method, model, problem, subproblem,
                 combinations, warm_start(); deadline = loop_deadline)
             model.num_nlp_solves += length(results)

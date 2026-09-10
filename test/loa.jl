@@ -175,6 +175,39 @@ function test_multi_generation_cuts()
         1.5)
 end
 
+# Every source reaches the optimum through a three-per-master loop, and
+# the neighborhood of a proposal on the 2 x 2 model is its two flips.
+function test_combination_sources()
+    for source in (DA.Neighborhood(), DA.Neighborhood(around = :incumbent),
+            DA.LPRounding(seed = 1), DA.RandomCombinations(seed = 1),
+            DA.CutoffResolve(tolerance = 0.5))
+        model, x, y = _batched_test_model(DA.MultiGenerationSize() => 3,
+            DA.CombinationSource() => source)
+        optimize!(model)
+        @test termination_status(model) == MOI.LOCALLY_SOLVED
+        @test objective_value(model) ≈ 1.0 atol = 1e-4
+        @test value(x) ≈ 0.0 atol = 1e-4
+    end
+    model, _, _ = _batched_test_model()
+    optimize!(model)
+    optimizer = unsafe_backend(model)
+    problem = DA._build_problem(optimizer)
+    master = DA._build_master(optimizer, problem)
+    proposal = _all_combinations(problem)[1]
+    neighbors, excluded = DA._candidate_combinations(DA.Neighborhood(),
+        optimizer, problem, master, proposal, nothing, 10, Inf)
+    @test !excluded
+    @test length(neighbors) == 2
+    @test all(n != proposal for n in neighbors)
+    @test all(count(n[b] != proposal[b] for b in keys(proposal)) == 2
+        for n in neighbors)
+    two, _ = DA._candidate_combinations(DA.Neighborhood(), optimizer,
+        problem, master, proposal, nothing, 1, Inf)
+    @test length(two) == 1
+    @test_throws ErrorException DA.Neighborhood(around = :elsewhere)
+    @test_throws ErrorException DA.CutoffResolve(tolerance = -1)
+end
+
 function test_quadratic_objective()
     model = Model(_loa_optimizer())
     set_silent(model)
@@ -975,6 +1008,7 @@ end
     test_batched_subproblems_loa()
     test_batched_matches_sequential()
     test_multi_generation_cuts()
+    test_combination_sources()
     test_quadratic_objective()
     test_max_sense_linear()
     test_two_disjunctions()
