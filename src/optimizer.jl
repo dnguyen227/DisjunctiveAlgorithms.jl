@@ -135,6 +135,20 @@ struct MultiGenerationSize <: AbstractAlgorithmAttribute end
 _default(::MultiGenerationSize) = 1
 
 """
+    CombinationSource() <: AbstractAlgorithmAttribute -> Any
+
+Where the extra combinations of a [`MultiGenerationSize`](@ref)
+iteration come from. The default `nothing` reads the master's solution
+pool (result indices past 1) and re-solves the master behind no-good
+cuts for the rest. The experimental sources in `combination_sources.jl`
+need nothing from the solver: [`Neighborhood`](@ref),
+[`LPRounding`](@ref), [`RandomCombinations`](@ref), and
+[`CutoffResolve`](@ref). A source extends `_candidate_combinations`.
+"""
+struct CombinationSource <: AbstractAlgorithmAttribute end
+_default(::CombinationSource) = nothing
+
+"""
     SubproblemMethod() <: AbstractAlgorithmAttribute -> Any
 
 How the NLP subproblems are built and solved. The default `nothing`
