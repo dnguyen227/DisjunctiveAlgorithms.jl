@@ -36,11 +36,11 @@ _push_candidate!(candidates, combination, proposal) =
         push!(candidates, combination)
 
 ################################################################################
-#                       DEFAULT: POOL, THEN RE-SOLVES
+#                       DEFAULT: POOL, OR RE-SOLVES
 ################################################################################
 # Result indices past 1 are the solver's pool (Gurobi's PoolSolutions);
-# whatever it does not supply comes from re-solving behind a no-good
-# cut per combination taken.
+# a short pool means a short batch. Only a solver without a pool falls
+# back to re-solving behind a no-good cut per combination taken.
 function _candidate_combinations(
     ::Nothing,
     model::Optimizer,
@@ -56,7 +56,7 @@ function _candidate_combinations(
         _push_candidate!(candidates,
             _extract_combination(problem, master, index), proposal)
     end
-    length(candidates) >= count && return candidates, false
+    MOI.get(master.model, MOI.ResultCount()) > 1 && return candidates, false
     return _resolve_candidates(model, problem, master, proposal, candidates,
         count, deadline)
 end

@@ -126,8 +126,9 @@ Indicator combinations evaluated per master solve in the main loop
 (multi-generation cuts). Defaults to `1`, plain LOA. Extra
 combinations come from the master's solution pool when the
 `mip_solver` exposes one through `MOI.ResultCount` (Gurobi with
-`PoolSolutions`), and otherwise from re-solving the master behind a
-no-good cut per combination already taken. All of them go through
+`PoolSolutions`), as many as it holds up to this size, and otherwise
+from re-solving the master behind a no-good cut per combination
+already taken. All of them go through
 `_solve_nlps`, one stacked NLP under [`BatchedSubproblems`](@ref), and
 every result adds its cuts before the next master solve.
 """
@@ -139,11 +140,12 @@ _default(::MultiGenerationSize) = 1
 
 Where the extra combinations of a [`MultiGenerationSize`](@ref)
 iteration come from. The default `nothing` reads the master's solution
-pool (result indices past 1) and re-solves the master behind no-good
-cuts for the rest. The experimental sources in `combination_sources.jl`
-need nothing from the solver: [`Neighborhood`](@ref),
-[`LPRounding`](@ref), [`RandomCombinations`](@ref), and
-[`CutoffResolve`](@ref). A source extends `_candidate_combinations`.
+pool (result indices past 1), and only without a pool re-solves the
+master behind no-good cuts. The experimental sources in
+`combination_sources.jl` need nothing from the solver:
+[`Neighborhood`](@ref), [`LPRounding`](@ref),
+[`RandomCombinations`](@ref), and [`CutoffResolve`](@ref). A source
+extends `_candidate_combinations`.
 """
 struct CombinationSource <: AbstractAlgorithmAttribute end
 _default(::CombinationSource) = nothing
@@ -205,13 +207,16 @@ mutable struct Optimizer <: MOI.AbstractOptimizer
     solve_time::Float64
     num_master_solves::Int
     num_nlp_solves::Int
+    master_time::Float64
+    nlp_time::Float64
 end
 
 function Optimizer(nlp_solver, mip_solver = nlp_solver)
     return Optimizer(nlp_solver, mip_solver,
         MOI.Utilities.UniversalFallback(MOI.Utilities.Model{Float64}()),
         nothing, 3600.0, false, MOI.OPTIMIZE_NOT_CALLED, MOI.NO_SOLUTION,
-        Dict{MOI.VariableIndex, Float64}(), NaN, nothing, NaN, "", NaN, 0, 0)
+        Dict{MOI.VariableIndex, Float64}(), NaN, nothing, NaN, "", NaN, 0, 0,
+        0.0, 0.0)
 end
 
 _algorithm(model::Optimizer) =
@@ -242,6 +247,8 @@ function _reset_results(model::Optimizer)
     model.solve_time = NaN
     model.num_master_solves = 0
     model.num_nlp_solves = 0
+    model.master_time = 0.0
+    model.nlp_time = 0.0
     return
 end
 
@@ -515,9 +522,28 @@ Indicator combinations evaluated by NLP subproblems in the last
 """
 struct NLPSolveCount <: MOI.AbstractModelAttribute end
 
-MOI.is_set_by_optimize(::Union{MasterSolveCount, NLPSolveCount}) = true
+"""
+    MasterSolveTime() <: MOI.AbstractModelAttribute -> Float64
+
+Seconds spent inside master MILP solves in the last `optimize!`.
+"""
+struct MasterSolveTime <: MOI.AbstractModelAttribute end
+
+"""
+    NLPSolveTime() <: MOI.AbstractModelAttribute -> Float64
+
+Seconds spent inside NLP subproblem solves in the last `optimize!`,
+feasibility restoration and stacked batches included.
+"""
+struct NLPSolveTime <: MOI.AbstractModelAttribute end
+
+const _SolveStatistic = Union{MasterSolveCount, NLPSolveCount,
+    MasterSolveTime, NLPSolveTime}
+MOI.is_set_by_optimize(::_SolveStatistic) = true
 MOI.get(model::Optimizer, ::MasterSolveCount) = model.num_master_solves
 MOI.get(model::Optimizer, ::NLPSolveCount) = model.num_nlp_solves
+MOI.get(model::Optimizer, ::MasterSolveTime) = model.master_time
+MOI.get(model::Optimizer, ::NLPSolveTime) = model.nlp_time
 
 function MOI.get(model::Optimizer, ::MOI.ResultCount)
     return model.primal_status == MOI.NO_SOLUTION ? 0 : 1
