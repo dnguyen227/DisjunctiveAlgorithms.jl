@@ -190,7 +190,7 @@ end
 
 function _solve_master(model::Optimizer, master::_Master, deadline::Float64)
     _cap_remaining_time(master.model, deadline)
-    MOI.optimize!(master.model)
+    model.master_time += @elapsed MOI.optimize!(master.model)
     model.num_master_solves += 1
     return _solved_and_feasible(master.model)
 end
@@ -293,8 +293,10 @@ function _optimize!(algorithm::LOA, model::Optimizer)
             master_status = status
             break
         end
+        t_nlp = time()
         result = _solve_nlp(method, model, problem, subproblem,
             combination, warm_start(); deadline = loop_deadline)
+        model.nlp_time += time() - t_nlp
         model.num_nlp_solves += 1
         process_result(result)
         unbounded && break
@@ -338,8 +340,10 @@ function _optimize!(algorithm::LOA, model::Optimizer)
                 master, best_result === nothing ? nothing :
                     best_result.combination,
                 MOI.get(algorithm, MultiGenerationSize()), loop_deadline)
+            t_nlp = time()
             results = _solve_nlps(method, model, problem, subproblem,
                 combinations, warm_start(); deadline = loop_deadline)
+            model.nlp_time += time() - t_nlp
             model.num_nlp_solves += length(results)
             for result in results
                 process_result(result; nogood = !excluded)

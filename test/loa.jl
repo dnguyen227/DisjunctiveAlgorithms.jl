@@ -166,6 +166,10 @@ function test_multi_generation_cuts()
     @test MOI.get(optimizer, DA.MasterSolveCount()) >= 1
     @test MOI.get(model, DA.NLPSolveCount()) ==
         MOI.get(optimizer, DA.NLPSolveCount())
+    master_time = MOI.get(model, DA.MasterSolveTime())
+    nlp_time = MOI.get(model, DA.NLPSolveTime())
+    @test master_time > 0 && nlp_time > 0
+    @test master_time + nlp_time <= MOI.get(model, MOI.SolveTimeSec())
     stacked, _, _ = _batched_test_model(DA.MultiGenerationSize() => 2,
         DA.SubproblemMethod() => DA.BatchedSubproblems())
     optimize!(stacked)
