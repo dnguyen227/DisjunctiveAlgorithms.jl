@@ -20,10 +20,10 @@ options selected through optimizer attributes.
 
 ## Installation
 
-DisjunctiveAlgorithms requires DisjunctiveProgramming v0.6.2, which is
-not registered yet: it lives on the `gdp_optimizer` branch (it adds
-`DisjunctionSet` and the `Direct()` reformulation). Until that release
-ships, install the branch first:
+DisjunctiveAlgorithms needs the `DisjunctionSet` set and the `Direct()`
+reformulation, which live on DisjunctiveProgramming's `gdp_optimizer`
+branch and are not in a registered release yet. Until they ship,
+install the branch first:
 
 ```julia
 import Pkg
