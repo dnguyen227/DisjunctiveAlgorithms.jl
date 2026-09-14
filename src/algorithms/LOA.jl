@@ -7,8 +7,9 @@
 `LOA` implements logic-based outer approximation (Turkay and
 Grossmann 1996): a MILP master keeps the linear rows exactly, gates
 each disjunct's rows on its indicator, and accumulates OA cuts from
-NLP subproblems solved at fixed indicator combinations, seeded by a
-set-covering pass over the nonlinear disjuncts. The OA bound is only
+NLP subproblems solved at fixed indicator combinations, seeded by
+the set-covering pass: a logic-only MIP over the indicators that
+activates every nonlinear disjunct once. The OA bound is only
 valid on convex problems, so convergence reports `LOCALLY_SOLVED`,
 never `OPTIMAL`.
 
@@ -162,7 +163,7 @@ end
 # GDPopt's covering weights: an uncovered disjunct outweighs all
 # covered ones
 function _cover_objective(
-    master::_Master,
+    set_cover::_SetCoverModel,
     cover::Vector{_Disjunct},
     needs_cover,
     num_covered::Int
@@ -170,7 +171,7 @@ function _cover_objective(
     objective = MOI.ScalarAffineFunction(MOI.ScalarAffineTerm{Float64}[], 0.0)
     for i in eachindex(cover)
         weight = Float64(needs_cover[i] ? num_covered + 1 : 1)
-        activation = _map_to(master.variable_map, cover[i].activation)
+        activation = _map_to(set_cover.variable_map, cover[i].activation)
         objective = MOI.Utilities.operate(+, Float64, objective,
             MOI.Utilities.operate(*, Float64, weight, activation))
     end
@@ -188,7 +189,11 @@ function _user_start_values(model::Optimizer, problem::_Problem)
     return isempty(point) ? nothing : (point = point,)
 end
 
-function _solve_master(model::Optimizer, master::_Master, deadline::Float64)
+function _solve_master(
+    model::Optimizer,
+    master::Union{_Master, _SetCoverModel},
+    deadline::Float64
+    )
     _cap_remaining_time(master.model, deadline)
     model.master_time += @elapsed MOI.optimize!(master.model)
     model.num_master_solves += 1
@@ -215,7 +220,11 @@ function _extract_combinations(
     return [proposal; extra], excluded
 end
 
-function _set_master_objective(master::_Master, sense, objective)
+function _set_master_objective(
+    master::Union{_Master, _SetCoverModel},
+    sense,
+    objective
+    )
     MOI.set(master.model, MOI.ObjectiveSense(), sense)
     MOI.set(master.model,
         MOI.ObjectiveFunction{MOI.ScalarAffineFunction{Float64}}(),
@@ -260,6 +269,7 @@ function _optimize!(algorithm::LOA, model::Optimizer)
         end
         result.feasible || _nlp_infeasible(result.status) ||
             (num_unresolved += 1)
+        result.feasible || (model.num_nlp_infeasible += 1)
         nogood && _avoid_combination(master, result.combination)
         _add_oa_cuts(model, problem, master, linearizer, result)
         if result.feasible &&
@@ -274,25 +284,25 @@ function _optimize!(algorithm::LOA, model::Optimizer)
     warm_start = () ->
         previous_result === nothing ? nothing : previous_result.point
 
-    # set covering: reuse the master with a coverage objective so
-    # every nonlinear disjunct gets visited once
+    # set covering: the logic-only problem picks combinations that
+    # activate every nonlinear disjunct once; the master only receives
+    # their NLPs' cuts
     cover = _cover_disjuncts(problem)
     needs_cover = trues(length(cover))
     num_covered = 0
+    set_cover = _build_set_cover(model, problem)
     for iteration in 1:MOI.get(algorithm, SetCoverIterationLimit())
         (iteration == 1 || any(needs_cover)) || break
         time() < loop_deadline || break
-        _set_master_objective(master, MOI.MAX_SENSE,
-            _cover_objective(master, cover, needs_cover, num_covered))
-        solved = _solve_master(model, master, loop_deadline)
-        # capture the status before the objective restore invalidates it
-        status = MOI.get(master.model, MOI.TerminationStatus())
-        combination = solved ? _extract_combination(problem, master) : nothing
-        _set_master_objective(master, master.sense, master.oa_objective)
-        if !solved
-            master_status = status
-            break
-        end
+        _set_master_objective(set_cover, MOI.MAX_SENSE,
+            _cover_objective(set_cover, cover, needs_cover, num_covered))
+        _solve_master(model, set_cover, loop_deadline) || break
+        combination = _extract_combination(problem, set_cover)
+        # the remaining targets are unreachable once a solve covers none
+        iteration == 1 || any(needs_cover[i] &&
+            _disjunct_active(combination, cover[i])
+            for i in eachindex(cover)) || break
+        _avoid_combination(set_cover, combination)
         t_nlp = time()
         result = _solve_nlp(method, model, problem, subproblem,
             combination, warm_start(); deadline = loop_deadline)

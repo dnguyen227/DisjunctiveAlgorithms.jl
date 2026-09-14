@@ -88,6 +88,37 @@ function _batched_test_model(attrs::Pair...)
     return model, x, y
 end
 
+# The set-cover problem holds the indicators, their integrality, the
+# exactly-one rows and the propositional rows; a row mixing continuous
+# variables stays out, and LOA still reaches the optimum from it.
+function test_set_cover_model()
+    model, x, y = _batched_test_model()
+    z, w = model[:z], model[:w]
+    @constraint(model, z[1] + w[1] >= 1)
+    @constraint(model, x + z[1] <= 10)
+    optimize!(model)
+    @test objective_value(model) ≈ 1.0 atol = 1e-4
+    optimizer = unsafe_backend(model)
+    problem = DA._build_problem(optimizer)
+    set_cover = DA._build_set_cover(optimizer, problem)
+    cover = set_cover.model
+    @test MOI.get(cover, MOI.NumberOfVariables()) == 4
+    @test MOI.get(cover, MOI.NumberOfConstraints{MOI.VariableIndex,
+        MOI.ZeroOne}()) == 4
+    affine = MOI.ScalarAffineFunction{Float64}
+    @test MOI.get(cover, MOI.NumberOfConstraints{affine,
+        MOI.EqualTo{Float64}}()) == 2
+    @test MOI.get(cover, MOI.NumberOfConstraints{affine,
+        MOI.GreaterThan{Float64}}()) == 1
+    @test MOI.get(cover, MOI.NumberOfConstraints{affine,
+        MOI.LessThan{Float64}}()) == 0
+    combination = Dict(JuMP.index(z[1]) => true, JuMP.index(z[2]) => false,
+        JuMP.index(w[1]) => true, JuMP.index(w[2]) => false)
+    DA._avoid_combination(set_cover, combination)
+    @test MOI.get(cover, MOI.NumberOfConstraints{affine,
+        MOI.GreaterThan{Float64}}()) == 2
+end
+
 # every combination that activates exactly one disjunct per disjunction
 function _all_combinations(problem::DA._Problem)
     choices = Iterators.product((disjunction.disjuncts
@@ -166,6 +197,8 @@ function test_multi_generation_cuts()
     @test MOI.get(optimizer, DA.MasterSolveCount()) >= 1
     @test MOI.get(model, DA.NLPSolveCount()) ==
         MOI.get(optimizer, DA.NLPSolveCount())
+    @test 0 <= MOI.get(model, DA.NLPInfeasibleCount()) <=
+        MOI.get(model, DA.NLPSolveCount())
     master_time = MOI.get(model, DA.MasterSolveTime())
     nlp_time = MOI.get(model, DA.NLPSolveTime())
     @test master_time > 0 && nlp_time > 0
@@ -811,11 +844,14 @@ function test_time_limit_with_incumbent()
     @test occursin("limit hit", raw_status(model))
 end
 
-# The master finishes abnormally after an incumbent exists: the mock
-# master reports a node limit on its second solve.
+# The master finishes abnormally after an incumbent exists: the second
+# MIP solve of the run, the first master solve after the covering NLP,
+# reports a node limit.
 function test_master_abnormal_status_with_incumbent()
-    factory = () -> DA.Optimizer(Ipopt.Optimizer,
-        () -> MockSolver(HiGHS.Optimizer, fail_from = 2))
+    solves = Ref(0)
+    mip = () -> MockSolver(HiGHS.Optimizer, fail_from = 2,
+        shared_solves = solves)
+    factory = () -> DA.Optimizer(Ipopt.Optimizer, mip)
     model = Model(factory)
     set_silent(model)
     @variable(model, 0 <= x <= 10)
@@ -1052,6 +1088,7 @@ end
 end
 
 @testset "LOA units" begin
+    test_set_cover_model()
     test_cut_term_directions()
     test_activation_binary()
     test_sense_primitives()

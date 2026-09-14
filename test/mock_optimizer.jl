@@ -4,6 +4,10 @@
 # Delegates every MOI call to a wrapped optimizer, but sleeps
 # `sleep_time` seconds in each solve and, from solve `fail_from` on,
 # skips the inner solve and reports `fail_status` with no solution.
+# `shared_solves` counts solves across every instance handed the same
+# `Ref`, so `fail_from` can address the n-th MIP solve of a run that
+# instantiates the factory more than once (support probe, master,
+# set-cover model).
 # Deterministic triggers for the deadline and abnormal-master paths.
 # `strict_constants` imitates direct wrappers (e.g. Gurobi) that reject
 # scalar functions with nonzero constants.
@@ -14,6 +18,7 @@ mutable struct MockSolver <: MOI.AbstractOptimizer
     fail_status::MOI.TerminationStatusCode
     strict_constants::Bool
     solves::Int
+    shared_solves::Ref{Int}
     failing::Bool
 end
 
@@ -22,16 +27,18 @@ function MockSolver(
     sleep_time::Float64 = 0.0,
     fail_from::Int = typemax(Int),
     fail_status::MOI.TerminationStatusCode = MOI.NODE_LIMIT,
-    strict_constants::Bool = false
+    strict_constants::Bool = false,
+    shared_solves::Ref{Int} = Ref(0)
     )
     return MockSolver(MOI.instantiate(factory), sleep_time, fail_from,
-        fail_status, strict_constants, 0, false)
+        fail_status, strict_constants, 0, shared_solves, false)
 end
 
 function MOI.optimize!(model::MockSolver)
     model.solves += 1
+    model.shared_solves[] += 1
     model.sleep_time > 0 && sleep(model.sleep_time)
-    model.failing = model.solves >= model.fail_from
+    model.failing = model.shared_solves[] >= model.fail_from
     model.failing || MOI.optimize!(model.inner)
     return
 end

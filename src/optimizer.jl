@@ -45,7 +45,9 @@ _default(::NumIterationLimit) = 10
 """
     SetCoverIterationLimit() <: AbstractAlgorithmAttribute -> Int
 
-Set-covering initialization iterations. Defaults to `8`.
+Set-covering initialization iterations: each solves the logic-only
+cover MIP over the indicators and one NLP, until every nonlinear
+disjunct has been active in a feasible NLP. Defaults to `8`.
 """
 struct SetCoverIterationLimit <: AbstractAlgorithmAttribute end
 _default(::SetCoverIterationLimit) = 8
@@ -207,6 +209,7 @@ mutable struct Optimizer <: MOI.AbstractOptimizer
     solve_time::Float64
     num_master_solves::Int
     num_nlp_solves::Int
+    num_nlp_infeasible::Int
     master_time::Float64
     nlp_time::Float64
 end
@@ -216,7 +219,7 @@ function Optimizer(nlp_solver, mip_solver = nlp_solver)
         MOI.Utilities.UniversalFallback(MOI.Utilities.Model{Float64}()),
         nothing, 3600.0, false, MOI.OPTIMIZE_NOT_CALLED, MOI.NO_SOLUTION,
         Dict{MOI.VariableIndex, Float64}(), NaN, nothing, NaN, "", NaN, 0, 0,
-        0.0, 0.0)
+        0, 0.0, 0.0)
 end
 
 _algorithm(model::Optimizer) =
@@ -247,6 +250,7 @@ function _reset_results(model::Optimizer)
     model.solve_time = NaN
     model.num_master_solves = 0
     model.num_nlp_solves = 0
+    model.num_nlp_infeasible = 0
     model.master_time = 0.0
     model.nlp_time = 0.0
     return
@@ -523,6 +527,15 @@ Indicator combinations evaluated by NLP subproblems in the last
 struct NLPSolveCount <: MOI.AbstractModelAttribute end
 
 """
+    NLPInfeasibleCount() <: MOI.AbstractModelAttribute -> Int
+
+Indicator combinations whose NLP subproblem returned no feasible point
+in the last `optimize!` (infeasible or failed), out of
+[`NLPSolveCount`](@ref).
+"""
+struct NLPInfeasibleCount <: MOI.AbstractModelAttribute end
+
+"""
     MasterSolveTime() <: MOI.AbstractModelAttribute -> Float64
 
 Seconds spent inside master MILP solves in the last `optimize!`.
@@ -538,10 +551,11 @@ feasibility restoration and stacked batches included.
 struct NLPSolveTime <: MOI.AbstractModelAttribute end
 
 const _SolveStatistic = Union{MasterSolveCount, NLPSolveCount,
-    MasterSolveTime, NLPSolveTime}
+    NLPInfeasibleCount, MasterSolveTime, NLPSolveTime}
 MOI.is_set_by_optimize(::_SolveStatistic) = true
 MOI.get(model::Optimizer, ::MasterSolveCount) = model.num_master_solves
 MOI.get(model::Optimizer, ::NLPSolveCount) = model.num_nlp_solves
+MOI.get(model::Optimizer, ::NLPInfeasibleCount) = model.num_nlp_infeasible
 MOI.get(model::Optimizer, ::MasterSolveTime) = model.master_time
 MOI.get(model::Optimizer, ::NLPSolveTime) = model.nlp_time
 

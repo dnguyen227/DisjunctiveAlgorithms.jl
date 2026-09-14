@@ -242,7 +242,14 @@ function _relaxed_activations(
     )
     lp = _instantiate(model.mip_solver)
     index_map = MOI.copy_to(lp, master.model)
+    # indicator-gated rows have no relaxation without their binary, so
+    # they leave with the integrality; the big-M cuts stay
     for (F, S) in MOI.get(lp, MOI.ListOfConstraintTypesPresent())
+        if S <: MOI.Indicator
+            foreach(ci -> MOI.delete(lp, ci),
+                collect(MOI.get(lp, MOI.ListOfConstraintIndices{F, S}())))
+            continue
+        end
         F === MOI.VariableIndex && S in (MOI.ZeroOne, MOI.Integer) || continue
         for ci in collect(MOI.get(lp, MOI.ListOfConstraintIndices{F, S}()))
             vi = MOI.get(lp, MOI.ConstraintFunction(), ci)

@@ -12,6 +12,14 @@ mutable struct _Master
     oa_objective::MOI.ScalarAffineFunction{Float64}
 end
 
+# Turkay and Grossmann's set-covering problem: the disjunct binaries
+# under the exactly-one rows and the propositional rows only, with no
+# continuous variables and no cuts
+struct _SetCoverModel
+    model::MOI.ModelLike
+    variable_map::Dict{MOI.VariableIndex, MOI.VariableIndex}
+end
+
 function _instantiate(factory)
     solver = MOI.instantiate(factory;
         with_cache_type = Float64, with_bridge_type = Float64)
@@ -71,6 +79,30 @@ function _build_master(model::Optimizer, problem::_Problem)
         oa_objective)
     return _Master(mip, variable_map, sense, problem.objective, alpha_oa,
         oa_objective)
+end
+
+function _build_set_cover(model::Optimizer, problem::_Problem)
+    mip = _instantiate(model.mip_solver)
+    binaries = Set(problem.binaries)
+    variable_map = Dict{MOI.VariableIndex, MOI.VariableIndex}(
+        vi => MOI.add_variable(mip) for vi in problem.binaries)
+    for ci in problem.variable_cis
+        vi = MOI.get(model.cache, MOI.ConstraintFunction(), ci)
+        vi in binaries || continue
+        MOI.add_constraint(mip, variable_map[vi],
+            MOI.get(model.cache, MOI.ConstraintSet(), ci))
+    end
+    # propositional logic arrives as affine rows over the binaries
+    for ci in problem.linear_cis
+        func = MOI.get(model.cache, MOI.ConstraintFunction(), ci)
+        all(term.variable in binaries for term in func.terms) || continue
+        MOI.add_constraint(mip, _map_to(variable_map, func),
+            MOI.get(model.cache, MOI.ConstraintSet(), ci))
+    end
+    for disjunction in problem.disjunctions
+        _add_exactly_one(mip, variable_map, disjunction)
+    end
+    return _SetCoverModel(mip, variable_map)
 end
 
 # Indicators sum to the activation (1 top-level, parent indicator
@@ -153,7 +185,11 @@ function _add_penalized_slack(
 end
 
 # round to Bool; MILP values are only within integer tolerance
-function _extract_combination(problem::_Problem, master::_Master, index = 1)
+function _extract_combination(
+    problem::_Problem,
+    master::Union{_Master, _SetCoverModel},
+    index = 1
+    )
     return Dict{MOI.VariableIndex, Bool}(
         binary => round(Bool, MOI.get(master.model,
             MOI.VariablePrimal(index), master.variable_map[binary]))
@@ -161,7 +197,10 @@ function _extract_combination(problem::_Problem, master::_Master, index = 1)
 end
 
 # No-good cut: active `1 - z` plus inactive `z` terms must reach 1
-function _avoid_combination(master::_Master, combination::AbstractDict)
+function _avoid_combination(
+    master::Union{_Master, _SetCoverModel},
+    combination::AbstractDict
+    )
     terms = MOI.ScalarAffineTerm{Float64}[]
     constant = 0.0
     for (binary, value) in combination
