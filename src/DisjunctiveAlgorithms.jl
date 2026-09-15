@@ -7,10 +7,10 @@ import DisjunctiveProgramming: DisjunctionSet, activation_index,
 
 include("optimizer.jl")
 include("problem.jl")
-include("master.jl")
+include("algorithms/LOA/master.jl")
 include("combination_sources.jl")
-include("nlp.jl")
-include("cuts.jl")
+include("algorithms/LOA/nlp.jl")
+include("algorithms/LOA/cuts.jl")
 include("algorithms/LOA.jl")
 
 end
