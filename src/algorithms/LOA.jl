@@ -7,9 +7,12 @@
 `LOA` implements logic-based outer approximation (Turkay and
 Grossmann 1996): a MILP master keeps the linear rows exactly, gates
 each disjunct's rows on its indicator, and accumulates OA cuts from
-NLP subproblems solved at fixed indicator combinations, seeded by
-the set-covering pass: a logic-only MIP over the indicators that
-activates every nonlinear disjunct once. The OA bound is only
+NLP subproblems solved at fixed indicator combinations. The
+set-covering pass of Turkay and Grossmann (1996, Appendix D),
+restricted to the nonlinear disjuncts as in GDPopt (Chen, Johnson,
+Siirola and Grossmann 2018), initializes it with combinations that
+activate every nonlinear disjunct once; [`SetCoverProblem`](@ref)
+picks the covering problem. The OA bound is only
 valid on convex problems, so convergence reports `LOCALLY_SOLVED`,
 never `OPTIMAL`.
 
@@ -33,7 +36,7 @@ never `OPTIMAL`.
 mutable struct LOA <: AbstractAlgorithm
     num_iteration_limit::Union{Nothing, Int}
     set_cover_iteration_limit::Union{Nothing, Int}
-    set_cover_problem::Union{Nothing, String}
+    set_cover_problem::Union{Nothing, AbstractSetCover}
     m_value::Union{Nothing, Float64}
     master_reformulation::Union{Nothing, String}
     max_slack::Union{Nothing, Float64}
@@ -65,9 +68,8 @@ function _validate(::MasterReformulation, value)
 end
 
 function _validate(::SetCoverProblem, value)
-    value in ("logic", "master") || error(
-        "`SetCoverProblem` must be \"logic\" or \"master\" " *
-        "(got `$value`).")
+    value isa AbstractSetCover || error("`SetCoverProblem` must be an " *
+        "`AbstractSetCover`, e.g. `LogicOnlyCover()` (got `$value`).")
     return nothing
 end
 function _validate(::OASlack, value)
@@ -170,8 +172,25 @@ function _cover_disjuncts(problem::_Problem)
     return cover
 end
 
-# GDPopt's covering weights: an uncovered disjunct outweighs all
-# covered ones
+# The covering problem: a fresh logic-only model, or the master itself
+_set_cover_model(::LogicOnlyCover, model, problem, master) =
+    _build_set_cover(model, problem)
+_set_cover_model(::MasterCover, model, problem, master) = master
+
+# A covering solve on the master leaves the covering objective behind;
+# the OA objective goes back before any cut is added
+_restore_objective(::LogicOnlyCover, master::_Master) = nothing
+_restore_objective(::MasterCover, master::_Master) =
+    _set_master_objective(master, master.sense, master.oa_objective)
+
+# The logic model needs its own no-good cut to move on; the master
+# receives the combination's no-good cut from `process_result`
+_exclude_combination(::LogicOnlyCover, set_cover, combination) =
+    _avoid_combination(set_cover, combination)
+_exclude_combination(::MasterCover, set_cover, combination) = nothing
+
+# Turkay and Grossmann's covering weights, as GDPopt uses them: an
+# uncovered disjunct outweighs all covered ones
 function _cover_objective(
     set_cover::Union{_Master, _SetCoverModel},
     cover::Vector{_Disjunct},
@@ -294,35 +313,29 @@ function _optimize!(algorithm::LOA, model::Optimizer)
     warm_start = () ->
         previous_result === nothing ? nothing : previous_result.point
 
-    # set covering: the covering problem picks combinations that
-    # activate every nonlinear disjunct once. Under `SetCoverProblem()
-    # = "logic"` it is the logic-only problem and the master only
-    # receives the NLPs' cuts; under `"master"` the master itself is
-    # solved with the covering objective swapped in and out, so the
-    # seeds satisfy the linear rows (GDPopt) and the no-good cuts come
-    # from `process_result`.
+    # set covering: the covering problem (`SetCoverProblem`) picks
+    # combinations that activate every nonlinear disjunct once; the
+    # master receives their NLPs' cuts
     cover = _cover_disjuncts(problem)
     needs_cover = trues(length(cover))
     num_covered = 0
-    cover_master = MOI.get(algorithm, SetCoverProblem()) == "master"
-    set_cover = cover_master ? master : _build_set_cover(model, problem)
+    covering_algorithm = MOI.get(algorithm, SetCoverProblem())
+    set_cover = _set_cover_model(covering_algorithm, model, problem, master)
     for iteration in 1:MOI.get(algorithm, SetCoverIterationLimit())
         (iteration == 1 || any(needs_cover)) || break
         time() < loop_deadline || break
         _set_master_objective(set_cover, MOI.MAX_SENSE,
             _cover_objective(set_cover, cover, needs_cover, num_covered))
         solved = _solve_master(model, set_cover, loop_deadline)
-        # the master loses its solution when its objective is restored
         combination = solved ? _extract_combination(problem, set_cover) :
             nothing
-        cover_master && _set_master_objective(master, sense,
-            master.oa_objective)
+        _restore_objective(covering_algorithm, master)
         solved || break
         # the remaining targets are unreachable once a solve covers none
         iteration == 1 || any(needs_cover[i] &&
             _disjunct_active(combination, cover[i])
             for i in eachindex(cover)) || break
-        cover_master || _avoid_combination(set_cover, combination)
+        _exclude_combination(covering_algorithm, set_cover, combination)
         t_nlp = time()
         result = _solve_nlp(method, model, problem, subproblem,
             combination, warm_start(); deadline = loop_deadline)

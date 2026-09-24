@@ -668,13 +668,13 @@ function test_vector_of_variables_disjunction()
     @test value(zin[2]) ≈ 1.0 atol = 1e-5
 end
 
-# `SetCoverProblem() => "master"` seeds from the full master: on a
-# problem whose linear rows rule out most combinations (x + y >= 12
-# with x in a disjunct), the logic-only seed draws a combination whose
-# NLP is infeasible, while the master seed lands on a feasible one and
+# `SetCoverProblem() => MasterCover()` covers from the full master: on
+# a problem whose linear rows rule out most combinations (x + y >= 12
+# with x in a disjunct), the logic-only cover draws a combination whose
+# NLP is infeasible, while the master cover lands on a feasible one and
 # the run ends with the same incumbent.
 function test_set_cover_problem_master()
-    for cover in ("logic", "master")
+    for cover in (DA.LogicOnlyCover(), DA.MasterCover())
         model = Model(_loa_optimizer(DA.SetCoverProblem() => cover))
         set_silent(model)
         @variable(model, 0 <= x <= 10)
@@ -689,10 +689,10 @@ function test_set_cover_problem_master()
         @test objective_value(model) ≈ 24.0 atol = 1e-4
         @test value(z[2]) ≈ 1.0 atol = 1e-5
         infeasible = MOI.get(unsafe_backend(model), DA.NLPInfeasibleCount())
-        cover == "master" && @test infeasible == 0
+        cover isa DA.MasterCover && @test infeasible == 0
     end
     @test_throws ErrorException Model(_loa_optimizer(
-        DA.SetCoverProblem() => "cuts"))
+        DA.SetCoverProblem() => "master"))
 end
 
 # Zero iteration budgets exit before any solve, without an incumbent.

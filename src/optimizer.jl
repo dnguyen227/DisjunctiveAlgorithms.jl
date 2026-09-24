@@ -53,17 +53,40 @@ struct SetCoverIterationLimit <: AbstractAlgorithmAttribute end
 _default(::SetCoverIterationLimit) = 8
 
 """
-    SetCoverProblem() <: AbstractAlgorithmAttribute -> String
+    AbstractSetCover
 
-Which problem the set-covering pass solves for its seed combinations:
-`"logic"` (the disjunct binaries under the exactly-one and
-propositional rows only, Turkay and Grossmann's covering problem) or
-`"master"` (the full MILP master with the covering objective swapped
-in, as Pyomo GDPopt does, so the seeds also satisfy the linear rows
-and their NLPs are far less often infeasible). Defaults to `"logic"`.
+A super-type for the problems the set-covering pass can solve for its
+initial combinations; see [`SetCoverProblem`](@ref).
+"""
+abstract type AbstractSetCover end
+
+"""
+    LogicOnlyCover() <: AbstractSetCover
+
+The covering problem of Turkay and Grossmann (1996, Appendix D): the
+disjunct binaries under the exactly-one and propositional rows only.
+"""
+struct LogicOnlyCover <: AbstractSetCover end
+
+"""
+    MasterCover() <: AbstractSetCover
+
+The MILP master with the covering objective swapped in, as Pyomo's
+GDPopt does (Chen, Johnson, Siirola and Grossmann 2018), so the
+initial combinations also satisfy the linear rows and their NLPs are
+far less often infeasible.
+"""
+struct MasterCover <: AbstractSetCover end
+
+"""
+    SetCoverProblem() <: AbstractAlgorithmAttribute -> AbstractSetCover
+
+Which problem the set-covering pass solves for its initial combinations,
+[`LogicOnlyCover`](@ref) or [`MasterCover`](@ref). Defaults to
+`LogicOnlyCover()`.
 """
 struct SetCoverProblem <: AbstractAlgorithmAttribute end
-_default(::SetCoverProblem) = "logic"
+_default(::SetCoverProblem) = LogicOnlyCover()
 
 """
     M_Value() <: AbstractAlgorithmAttribute -> Float64
