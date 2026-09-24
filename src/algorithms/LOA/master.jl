@@ -29,10 +29,15 @@ function _solved_and_feasible(solver::MOI.ModelLike)
         MOI.get(solver, MOI.PrimalStatus()) == MOI.FEASIBLE_POINT
 end
 
+# The solver keeps any limit of its own (a per-solve cap from its
+# factory) and only ever gets the remaining budget when that is less
 function _cap_remaining_time(solver::MOI.ModelLike, deadline::Float64)
     isfinite(deadline) || return
-    MOI.supports(solver, MOI.TimeLimitSec()) &&
-        MOI.set(solver, MOI.TimeLimitSec(), max(0.0, deadline - time()))
+    MOI.supports(solver, MOI.TimeLimitSec()) || return
+    remaining = max(0.0, deadline - time())
+    limit = MOI.get(solver, MOI.TimeLimitSec())
+    MOI.set(solver, MOI.TimeLimitSec(),
+        limit === nothing ? remaining : min(limit, remaining))
     return
 end
 

@@ -17,6 +17,7 @@ never `OPTIMAL`.
 
 - [`NumIterationLimit`](@ref)
 - [`SetCoverIterationLimit`](@ref)
+- [`SetCoverProblem`](@ref)
 - [`M_Value`](@ref)
 - [`MasterReformulation`](@ref)
 - [`MaxSlack`](@ref)
@@ -32,6 +33,7 @@ never `OPTIMAL`.
 mutable struct LOA <: AbstractAlgorithm
     num_iteration_limit::Union{Nothing, Int}
     set_cover_iteration_limit::Union{Nothing, Int}
+    set_cover_problem::Union{Nothing, String}
     m_value::Union{Nothing, Float64}
     master_reformulation::Union{Nothing, String}
     max_slack::Union{Nothing, Float64}
@@ -45,7 +47,8 @@ mutable struct LOA <: AbstractAlgorithm
     subproblem_method::Any
 
     LOA() = new(nothing, nothing, nothing, nothing, nothing, nothing,
-        nothing, nothing, nothing, nothing, nothing, nothing, nothing)
+        nothing, nothing, nothing, nothing, nothing, nothing, nothing,
+        nothing)
 end
 
 _default(::Algorithm) = LOA()
@@ -61,6 +64,12 @@ function _validate(::MasterReformulation, value)
     return nothing
 end
 
+function _validate(::SetCoverProblem, value)
+    value in ("logic", "master") || error(
+        "`SetCoverProblem` must be \"logic\" or \"master\" " *
+        "(got `$value`).")
+    return nothing
+end
 function _validate(::OASlack, value)
     value > 0 ||
         error("`OASlack` must be positive (got `$value`).")
@@ -77,6 +86,7 @@ end
 for (attr, field) in (
     (NumIterationLimit, :num_iteration_limit),
     (SetCoverIterationLimit, :set_cover_iteration_limit),
+    (SetCoverProblem, :set_cover_problem),
     (M_Value, :m_value),
     (MasterReformulation, :master_reformulation),
     (MaxSlack, :max_slack),
@@ -163,7 +173,7 @@ end
 # GDPopt's covering weights: an uncovered disjunct outweighs all
 # covered ones
 function _cover_objective(
-    set_cover::_SetCoverModel,
+    set_cover::Union{_Master, _SetCoverModel},
     cover::Vector{_Disjunct},
     needs_cover,
     num_covered::Int
@@ -284,25 +294,35 @@ function _optimize!(algorithm::LOA, model::Optimizer)
     warm_start = () ->
         previous_result === nothing ? nothing : previous_result.point
 
-    # set covering: the logic-only problem picks combinations that
-    # activate every nonlinear disjunct once; the master only receives
-    # their NLPs' cuts
+    # set covering: the covering problem picks combinations that
+    # activate every nonlinear disjunct once. Under `SetCoverProblem()
+    # = "logic"` it is the logic-only problem and the master only
+    # receives the NLPs' cuts; under `"master"` the master itself is
+    # solved with the covering objective swapped in and out, so the
+    # seeds satisfy the linear rows (GDPopt) and the no-good cuts come
+    # from `process_result`.
     cover = _cover_disjuncts(problem)
     needs_cover = trues(length(cover))
     num_covered = 0
-    set_cover = _build_set_cover(model, problem)
+    cover_master = MOI.get(algorithm, SetCoverProblem()) == "master"
+    set_cover = cover_master ? master : _build_set_cover(model, problem)
     for iteration in 1:MOI.get(algorithm, SetCoverIterationLimit())
         (iteration == 1 || any(needs_cover)) || break
         time() < loop_deadline || break
         _set_master_objective(set_cover, MOI.MAX_SENSE,
             _cover_objective(set_cover, cover, needs_cover, num_covered))
-        _solve_master(model, set_cover, loop_deadline) || break
-        combination = _extract_combination(problem, set_cover)
+        solved = _solve_master(model, set_cover, loop_deadline)
+        # the master loses its solution when its objective is restored
+        combination = solved ? _extract_combination(problem, set_cover) :
+            nothing
+        cover_master && _set_master_objective(master, sense,
+            master.oa_objective)
+        solved || break
         # the remaining targets are unreachable once a solve covers none
         iteration == 1 || any(needs_cover[i] &&
             _disjunct_active(combination, cover[i])
             for i in eachindex(cover)) || break
-        _avoid_combination(set_cover, combination)
+        cover_master || _avoid_combination(set_cover, combination)
         t_nlp = time()
         result = _solve_nlp(method, model, problem, subproblem,
             combination, warm_start(); deadline = loop_deadline)
