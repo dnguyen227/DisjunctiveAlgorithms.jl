@@ -1,0 +1,217 @@
+################################################################################
+#                         MASTER CONSTRUCTION
+################################################################################
+# `alpha_oa` carries the objective; `oa_objective` also tracks the
+# slack penalties so set covering can swap objectives out and back
+mutable struct _Master
+    model::MOI.ModelLike
+    variable_map::Dict{MOI.VariableIndex, MOI.VariableIndex}
+    sense::MOI.OptimizationSense
+    objective::MOI.AbstractScalarFunction
+    alpha_oa::MOI.VariableIndex
+    oa_objective::MOI.ScalarAffineFunction{Float64}
+end
+
+# Turkay and Grossmann's set-covering problem: the disjunct binaries
+# under the exactly-one rows and the propositional rows only, with no
+# continuous variables and no cuts
+struct _SetCoverModel
+    model::MOI.ModelLike
+    variable_map::Dict{MOI.VariableIndex, MOI.VariableIndex}
+end
+
+_map_to(variable_map::AbstractDict, func) =
+    MOI.Utilities.map_indices(vi -> variable_map[vi], func)
+
+function _solved_and_feasible(solver::MOI.ModelLike)
+    status = MOI.get(solver, MOI.TerminationStatus())
+    return status in (MOI.OPTIMAL, MOI.LOCALLY_SOLVED) &&
+        MOI.get(solver, MOI.PrimalStatus()) == MOI.FEASIBLE_POINT
+end
+
+# The solver keeps any limit of its own (a per-solve cap from its
+# factory) and only ever gets the remaining budget when that is less
+function _cap_remaining_time(solver::MOI.ModelLike, time_limit::Float64)
+    isfinite(time_limit) || return
+    MOI.supports(solver, MOI.TimeLimitSec()) || return
+    remaining = max(0.0, time_limit - time())
+    solver_limit = MOI.get(solver, MOI.TimeLimitSec())
+    MOI.set(solver, MOI.TimeLimitSec(),
+        solver_limit === nothing ? remaining : min(solver_limit, remaining))
+    return
+end
+
+function _build_master(model::Optimizer, problem::_Problem)
+    mip = _instantiate(model.mip_solver)
+    variable_map = Dict{MOI.VariableIndex, MOI.VariableIndex}(
+        vi => MOI.add_variable(mip) for vi in problem.variables)
+    for ci in problem.variable_cis
+        vi = MOI.get(model.cache, MOI.ConstraintFunction(), ci)
+        MOI.add_constraint(mip, variable_map[vi],
+            MOI.get(model.cache, MOI.ConstraintSet(), ci))
+    end
+    for ci in problem.linear_cis
+        func = MOI.get(model.cache, MOI.ConstraintFunction(), ci)
+        MOI.add_constraint(mip, _map_to(variable_map, func),
+            MOI.get(model.cache, MOI.ConstraintSet(), ci))
+    end
+    # nonlinear-typed rows that demoted to affine stay in the master
+    for (func, set) in problem.nonlinear_rows
+        _is_linear(func) || continue
+        MOI.add_constraint(mip, _map_to(variable_map, _to_affine(func)), set)
+    end
+    for disjunction in problem.disjunctions
+        _add_exactly_one(mip, variable_map, disjunction)
+        for disjunct in disjunction.disjuncts
+            _add_gated_rows(mip, variable_map, disjunct, model)
+        end
+    end
+    alpha_oa = MOI.add_variable(mip)
+    sense = problem.sense
+    oa_objective = MOI.ScalarAffineFunction(
+        [MOI.ScalarAffineTerm(1.0, alpha_oa)], 0.0)
+    MOI.set(mip, MOI.ObjectiveSense(), sense)
+    MOI.set(mip,
+        MOI.ObjectiveFunction{MOI.ScalarAffineFunction{Float64}}(),
+        oa_objective)
+    return _Master(mip, variable_map, sense, problem.objective, alpha_oa,
+        oa_objective)
+end
+
+function _build_set_cover(model::Optimizer, problem::_Problem)
+    mip = _instantiate(model.mip_solver)
+    binaries = Set(problem.binaries)
+    variable_map = Dict{MOI.VariableIndex, MOI.VariableIndex}(
+        vi => MOI.add_variable(mip) for vi in problem.binaries)
+    for ci in problem.variable_cis
+        vi = MOI.get(model.cache, MOI.ConstraintFunction(), ci)
+        vi in binaries || continue
+        MOI.add_constraint(mip, variable_map[vi],
+            MOI.get(model.cache, MOI.ConstraintSet(), ci))
+    end
+    # propositional logic arrives as affine rows over the binaries
+    for ci in problem.linear_cis
+        func = MOI.get(model.cache, MOI.ConstraintFunction(), ci)
+        all(term.variable in binaries for term in func.terms) || continue
+        MOI.add_constraint(mip, _map_to(variable_map, func),
+            MOI.get(model.cache, MOI.ConstraintSet(), ci))
+    end
+    for disjunction in problem.disjunctions
+        _add_exactly_one(mip, variable_map, disjunction)
+    end
+    return _SetCoverModel(mip, variable_map)
+end
+
+# Indicators sum to the activation (1 top-level, parent indicator
+# nested); a complement pair normalizes to a trivial `1 == 1` row
+function _add_exactly_one(
+    mip::MOI.ModelLike,
+    variable_map::AbstractDict,
+    disjunction::_Disjunction
+    )
+    total = MOI.Utilities.operate(+, Float64,
+        (_map_to(variable_map, disjunct.activation)
+            for disjunct in disjunction.disjuncts)...)
+    lhs = MOI.Utilities.operate(-, Float64, total,
+        _map_to(variable_map, disjunction.activation))
+    MOI.Utilities.normalize_and_add_constraint(mip, lhs, MOI.EqualTo(0.0))
+    return
+end
+
+# split Interval rows; the indicator bridge takes one-sided sets only
+_indicator_sets(set::MOI.Interval{Float64}) =
+    (MOI.LessThan(set.upper), MOI.GreaterThan(set.lower))
+_indicator_sets(set::MOI.AbstractScalarSet) = (set,)
+
+# Gate each linear row with an indicator constraint or big-M per
+# `MasterReformulation`; nonlinear rows enter the master only as OA
+# cuts
+function _add_gated_rows(
+    mip::MOI.ModelLike,
+    variable_map::AbstractDict,
+    disjunct::_Disjunct,
+    model::Optimizer
+    )
+    master_reformulation = MOI.get(model, MasterReformulation())
+    activate = disjunct.active_value ? MOI.ACTIVATE_ON_ONE :
+        MOI.ACTIVATE_ON_ZERO
+    binary = variable_map[disjunct.binary]
+    activation = _map_to(variable_map, disjunct.activation)
+    M = Float64(MOI.get(model, M_Value()))
+    # M * (1 - activation) moved left, as in the disjunct OA cuts
+    M_relaxation = MOI.Utilities.operate(-, Float64,
+        MOI.Utilities.operate(*, Float64, M, activation), M)
+    for (func, set) in zip(disjunct.functions, disjunct.sets)
+        _is_linear(func) || continue
+        row = _map_to(variable_map, _to_affine(func))
+        if master_reformulation == "bigm"
+            for term in _oa_cut_terms(set, row)
+                lhs = MOI.Utilities.operate(+, Float64, term, M_relaxation)
+                MOI.Utilities.normalize_and_add_constraint(mip, lhs,
+                    MOI.LessThan(0.0))
+            end
+        else
+            for inner in _indicator_sets(set)
+                indicator_function = MOI.Utilities.operate(vcat, Float64,
+                    binary, row)
+                MOI.add_constraint(mip, indicator_function,
+                    MOI.Indicator{activate}(inner))
+            end
+        end
+    end
+    return
+end
+
+# bounded penalized slack so an invalid cut cannot blow up the master
+function _add_penalized_slack(
+    master::_Master,
+    model::Optimizer,
+    penalty_sign::Int
+    )
+    cut_slack = MOI.add_variable(master.model)
+    MOI.add_constraint(master.model, cut_slack, MOI.GreaterThan(0.0))
+    MOI.add_constraint(master.model, cut_slack,
+        MOI.LessThan(Float64(MOI.get(model, MaxSlack()))))
+    penalty = penalty_sign * Float64(MOI.get(model, OASlack()))
+    master.oa_objective = MOI.Utilities.operate(+, Float64,
+        master.oa_objective, MOI.ScalarAffineFunction(
+            [MOI.ScalarAffineTerm(penalty, cut_slack)], 0.0))
+    MOI.set(master.model,
+        MOI.ObjectiveFunction{MOI.ScalarAffineFunction{Float64}}(),
+        master.oa_objective)
+    return cut_slack
+end
+
+# round to Bool; MILP values are only within integer tolerance
+function _extract_combination(
+    problem::_Problem,
+    master::Union{_Master, _SetCoverModel},
+    result_index = 1
+    )
+    return Dict{MOI.VariableIndex, Bool}(
+        binary => round(Bool, MOI.get(master.model,
+            MOI.VariablePrimal(result_index), master.variable_map[binary]))
+        for binary in problem.binaries)
+end
+
+# No-good cut: active `1 - z` plus inactive `z` terms must reach 1
+function _avoid_combination(
+    master::Union{_Master, _SetCoverModel},
+    combination::AbstractDict
+    )
+    affine_terms = MOI.ScalarAffineTerm{Float64}[]
+    constant = 0.0
+    for (binary, value) in combination
+        master_variable = master.variable_map[binary]
+        if value
+            push!(affine_terms, MOI.ScalarAffineTerm(-1.0, master_variable))
+            constant += 1.0
+        else
+            push!(affine_terms, MOI.ScalarAffineTerm(1.0, master_variable))
+        end
+    end
+    cut = MOI.ScalarAffineFunction(affine_terms, constant)
+    MOI.Utilities.normalize_and_add_constraint(master.model, cut,
+        MOI.GreaterThan(1.0))
+    return
+end
