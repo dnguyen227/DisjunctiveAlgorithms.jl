@@ -31,13 +31,13 @@ end
 
 # The solver keeps any limit of its own (a per-solve cap from its
 # factory) and only ever gets the remaining budget when that is less
-function _cap_remaining_time(solver::MOI.ModelLike, deadline::Float64)
-    isfinite(deadline) || return
+function _cap_remaining_time(solver::MOI.ModelLike, time_limit::Float64)
+    isfinite(time_limit) || return
     MOI.supports(solver, MOI.TimeLimitSec()) || return
-    remaining = max(0.0, deadline - time())
-    limit = MOI.get(solver, MOI.TimeLimitSec())
+    remaining = max(0.0, time_limit - time())
+    solver_limit = MOI.get(solver, MOI.TimeLimitSec())
     MOI.set(solver, MOI.TimeLimitSec(),
-        limit === nothing ? remaining : min(limit, remaining))
+        solver_limit === nothing ? remaining : min(solver_limit, remaining))
     return
 end
 
@@ -112,9 +112,9 @@ function _add_exactly_one(
     total = MOI.Utilities.operate(+, Float64,
         (_map_to(variable_map, disjunct.activation)
             for disjunct in disjunction.disjuncts)...)
-    body = MOI.Utilities.operate(-, Float64, total,
+    lhs = MOI.Utilities.operate(-, Float64, total,
         _map_to(variable_map, disjunction.activation))
-    MOI.Utilities.normalize_and_add_constraint(mip, body, MOI.EqualTo(0.0))
+    MOI.Utilities.normalize_and_add_constraint(mip, lhs, MOI.EqualTo(0.0))
     return
 end
 
@@ -132,28 +132,29 @@ function _add_gated_rows(
     disjunct::_Disjunct,
     model::Optimizer
     )
-    gating = MOI.get(model, MasterReformulation())
+    master_reformulation = MOI.get(model, MasterReformulation())
     activate = disjunct.active_value ? MOI.ACTIVATE_ON_ONE :
         MOI.ACTIVATE_ON_ZERO
     binary = variable_map[disjunct.binary]
     activation = _map_to(variable_map, disjunct.activation)
     M = Float64(MOI.get(model, M_Value()))
     # M * (1 - activation) moved left, as in the disjunct OA cuts
-    gate = MOI.Utilities.operate(-, Float64,
+    M_relaxation = MOI.Utilities.operate(-, Float64,
         MOI.Utilities.operate(*, Float64, M, activation), M)
     for (func, set) in zip(disjunct.functions, disjunct.sets)
         _is_linear(func) || continue
         row = _map_to(variable_map, _to_affine(func))
-        if gating == "bigm"
+        if master_reformulation == "bigm"
             for term in _oa_cut_terms(set, row)
-                body = MOI.Utilities.operate(+, Float64, term, gate)
-                MOI.Utilities.normalize_and_add_constraint(mip, body,
+                lhs = MOI.Utilities.operate(+, Float64, term, M_relaxation)
+                MOI.Utilities.normalize_and_add_constraint(mip, lhs,
                     MOI.LessThan(0.0))
             end
         else
             for inner in _indicator_sets(set)
-                gated = MOI.Utilities.operate(vcat, Float64, binary, row)
-                MOI.add_constraint(mip, gated,
+                indicator_function = MOI.Utilities.operate(vcat, Float64,
+                    binary, row)
+                MOI.add_constraint(mip, indicator_function,
                     MOI.Indicator{activate}(inner))
             end
         end
@@ -167,29 +168,29 @@ function _add_penalized_slack(
     model::Optimizer,
     penalty_sign::Int
     )
-    slack = MOI.add_variable(master.model)
-    MOI.add_constraint(master.model, slack, MOI.GreaterThan(0.0))
-    MOI.add_constraint(master.model, slack,
+    cut_slack = MOI.add_variable(master.model)
+    MOI.add_constraint(master.model, cut_slack, MOI.GreaterThan(0.0))
+    MOI.add_constraint(master.model, cut_slack,
         MOI.LessThan(Float64(MOI.get(model, MaxSlack()))))
     penalty = penalty_sign * Float64(MOI.get(model, OASlack()))
     master.oa_objective = MOI.Utilities.operate(+, Float64,
         master.oa_objective, MOI.ScalarAffineFunction(
-            [MOI.ScalarAffineTerm(penalty, slack)], 0.0))
+            [MOI.ScalarAffineTerm(penalty, cut_slack)], 0.0))
     MOI.set(master.model,
         MOI.ObjectiveFunction{MOI.ScalarAffineFunction{Float64}}(),
         master.oa_objective)
-    return slack
+    return cut_slack
 end
 
 # round to Bool; MILP values are only within integer tolerance
 function _extract_combination(
     problem::_Problem,
     master::Union{_Master, _SetCoverModel},
-    index = 1
+    result_index = 1
     )
     return Dict{MOI.VariableIndex, Bool}(
         binary => round(Bool, MOI.get(master.model,
-            MOI.VariablePrimal(index), master.variable_map[binary]))
+            MOI.VariablePrimal(result_index), master.variable_map[binary]))
         for binary in problem.binaries)
 end
 
@@ -198,18 +199,18 @@ function _avoid_combination(
     master::Union{_Master, _SetCoverModel},
     combination::AbstractDict
     )
-    terms = MOI.ScalarAffineTerm{Float64}[]
+    affine_terms = MOI.ScalarAffineTerm{Float64}[]
     constant = 0.0
     for (binary, value) in combination
-        mapped = master.variable_map[binary]
+        master_variable = master.variable_map[binary]
         if value
-            push!(terms, MOI.ScalarAffineTerm(-1.0, mapped))
+            push!(affine_terms, MOI.ScalarAffineTerm(-1.0, master_variable))
             constant += 1.0
         else
-            push!(terms, MOI.ScalarAffineTerm(1.0, mapped))
+            push!(affine_terms, MOI.ScalarAffineTerm(1.0, master_variable))
         end
     end
-    cut = MOI.ScalarAffineFunction(terms, constant)
+    cut = MOI.ScalarAffineFunction(affine_terms, constant)
     MOI.Utilities.normalize_and_add_constraint(master.model, cut,
         MOI.GreaterThan(1.0))
     return

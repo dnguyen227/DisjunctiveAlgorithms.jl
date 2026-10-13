@@ -3,7 +3,7 @@
 ################################################################################
 # Where the extra combinations of a multi-generation iteration come
 # from. `_candidate_combinations(source, model, problem, master,
-# proposal, incumbent, count, deadline)` returns up to `count`
+# proposal, incumbent, count, time_limit)` returns up to `count`
 # combinations other than `proposal` and whether it already added their
 # no-good cuts to the master (a re-solving source must, so the loop
 # skips them). The default `nothing` source is the solver's pool, then
@@ -49,7 +49,7 @@ function _candidate_combinations(
     proposal::AbstractDict,
     incumbent,
     count::Int,
-    deadline::Float64
+    time_limit::Float64
     )
     candidates = _Combination[]
     for index in 2:min(count + 1, MOI.get(master.model, MOI.ResultCount()))
@@ -58,7 +58,7 @@ function _candidate_combinations(
     end
     MOI.get(master.model, MOI.ResultCount()) > 1 && return candidates, false
     return _resolve_candidates(model, problem, master, proposal, candidates,
-        count, deadline)
+        count, time_limit)
 end
 
 # Exclude the proposal and every candidate so far, then re-solve until
@@ -70,12 +70,12 @@ function _resolve_candidates(
     proposal::AbstractDict,
     candidates::Vector{_Combination},
     count::Int,
-    deadline::Float64
+    time_limit::Float64
     )
     _avoid_combination(master, proposal)
     foreach(c -> _avoid_combination(master, c), candidates)
-    while length(candidates) < count && time() < deadline
-        _solve_master(model, master, deadline) || break
+    while length(candidates) < count && time() < time_limit
+        _solve_master(model, master, time_limit) || break
         combination = _extract_combination(problem, master)
         combination == proposal && break
         combination in candidates && break
@@ -114,7 +114,7 @@ function _candidate_combinations(
     proposal::AbstractDict,
     incumbent,
     count::Int,
-    deadline::Float64
+    time_limit::Float64
     )
     # read the solution before any modification invalidates it
     value = MOI.get(master.model, MOI.ObjectiveValue())
@@ -125,7 +125,7 @@ function _candidate_combinations(
     cutoff = MOI.add_constraint(master.model, master.oa_objective, set)
     _set_primal_starts(master, starts)
     candidates, excluded = _resolve_candidates(model, problem, master,
-        proposal, _Combination[], count, deadline)
+        proposal, _Combination[], count, time_limit)
     MOI.delete(master.model, cutoff)
     return candidates, excluded
 end
@@ -174,7 +174,7 @@ function _candidate_combinations(
     proposal::AbstractDict,
     incumbent,
     count::Int,
-    deadline::Float64
+    time_limit::Float64
     )
     center = source.around == :incumbent && incumbent !== nothing ?
         incumbent : proposal
@@ -219,9 +219,9 @@ function _candidate_combinations(
     proposal::AbstractDict,
     incumbent,
     count::Int,
-    deadline::Float64
+    time_limit::Float64
     )
-    weights = _relaxed_activations(model, problem, master, deadline)
+    weights = _relaxed_activations(model, problem, master, time_limit)
     weights === nothing && return _Combination[], false
     candidates = _Combination[]
     for _ in 1:(20 * count)
@@ -238,7 +238,7 @@ function _relaxed_activations(
     model::Optimizer,
     problem::_Problem,
     master::_Master,
-    deadline::Float64
+    time_limit::Float64
     )
     lp = _instantiate(model.mip_solver)
     index_map = MOI.copy_to(lp, master.model)
@@ -257,7 +257,7 @@ function _relaxed_activations(
             S === MOI.ZeroOne && _bound_unit_interval(lp, vi)
         end
     end
-    _cap_remaining_time(lp, deadline)
+    _cap_remaining_time(lp, time_limit)
     MOI.optimize!(lp)
     _solved_and_feasible(lp) || return nothing
     value = vi -> MOI.get(lp, MOI.VariablePrimal(),
@@ -317,7 +317,7 @@ function _candidate_combinations(
     proposal::AbstractDict,
     incumbent,
     count::Int,
-    deadline::Float64
+    time_limit::Float64
     )
     candidates = _Combination[]
     for _ in 1:(20 * count)

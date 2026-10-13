@@ -102,7 +102,7 @@ function _solve_nlp(
     sub::_Subproblem,
     combination::AbstractDict,
     warm_start;
-    deadline::Float64 = Inf
+    time_limit::Float64 = Inf
     )
     for ci in sub.rows
         MOI.delete(sub.model, ci)
@@ -110,7 +110,7 @@ function _solve_nlp(
     append!(empty!(sub.rows), _fix_combination(sub.model, sub.variable_map,
         sub.fixes, problem, combination))
     _set_warm_start(sub.model, sub.variable_map, warm_start)
-    _cap_remaining_time(sub.model, deadline)
+    _cap_remaining_time(sub.model, time_limit)
     MOI.optimize!(sub.model)
     status = MOI.get(sub.model, MOI.TerminationStatus())
     if _solved_and_feasible(sub.model)
@@ -121,7 +121,7 @@ function _solve_nlp(
     end
     if Bool(MOI.get(model, UseNLPF()))
         result = _solve_nlpf(model, problem, combination, warm_start;
-            deadline = deadline)
+            time_limit = time_limit)
         result === nothing || return (; result..., status = status)
     end
     return (combination = combination,
@@ -137,10 +137,10 @@ function _solve_nlps(
     sub,
     combinations::AbstractVector,
     warm_start;
-    deadline::Float64 = Inf
+    time_limit::Float64 = Inf
     )
     return [_solve_nlp(method, model, problem, sub, combination, warm_start;
-        deadline) for combination in combinations]
+        time_limit) for combination in combinations]
 end
 
 ################################################################################
@@ -185,10 +185,10 @@ function _solve_nlp(
     sub::_BatchedSubproblem,
     combination::AbstractDict,
     warm_start;
-    deadline::Float64 = Inf
+    time_limit::Float64 = Inf
     )
     return only(_solve_nlps(method, model, problem, sub, [combination],
-        warm_start; deadline))
+        warm_start; time_limit))
 end
 
 # One stacked solve of the combinations as given; `nothing` when the
@@ -198,7 +198,7 @@ function _solve_stack(
     problem::_Problem,
     combinations::AbstractVector,
     warm_start,
-    deadline::Float64
+    time_limit::Float64
     )
     nlp = _instantiate(model.nlp_solver)
     copies = map(combinations) do combination
@@ -211,7 +211,7 @@ function _solve_stack(
         (_map_to(variable_map, problem.objective) for variable_map in copies))
     MOI.set(nlp, MOI.ObjectiveSense(), problem.sense)
     MOI.set(nlp, MOI.ObjectiveFunction{typeof(objective)}(), objective)
-    _cap_remaining_time(nlp, deadline)
+    _cap_remaining_time(nlp, time_limit)
     MOI.optimize!(nlp)
     _solved_and_feasible(nlp) || return nothing
     status = MOI.get(nlp, MOI.TerminationStatus())
@@ -232,7 +232,7 @@ function _solve_slacked_stack(
     problem::_Problem,
     combinations::AbstractVector,
     warm_start,
-    deadline::Float64
+    time_limit::Float64
     )
     nlp = _instantiate(model.nlp_solver)
     copies = map(combinations) do combination
@@ -244,7 +244,7 @@ function _solve_slacked_stack(
     MOI.set(nlp, MOI.ObjectiveFunction{MOI.ScalarAffineFunction{Float64}}(),
         MOI.ScalarAffineFunction(
             [MOI.ScalarAffineTerm(1.0, u) for (_, u) in copies], 0.0))
-    _cap_remaining_time(nlp, deadline)
+    _cap_remaining_time(nlp, time_limit)
     MOI.optimize!(nlp)
     _solved_and_feasible(nlp) || return nothing
     tolerance = Float64(MOI.get(model, SlackTolerance()))
@@ -266,24 +266,24 @@ function _solve_nlps(
     sub::_BatchedSubproblem,
     combinations::AbstractVector,
     warm_start;
-    deadline::Float64 = Inf
+    time_limit::Float64 = Inf
     )
     sequential = () -> _solve_nlps(nothing, model, problem, sub.sequential,
-        combinations, warm_start; deadline)
-    results = _solve_stack(model, problem, combinations, warm_start, deadline)
+        combinations, warm_start; time_limit)
+    results = _solve_stack(model, problem, combinations, warm_start, time_limit)
     results === nothing || return results
     Bool(MOI.get(model, UseNLPF())) || return sequential()
     restored = _solve_slacked_stack(model, problem, combinations, warm_start,
-        deadline)
+        time_limit)
     restored === nothing && return sequential()
     feasible, points = restored
     results = Vector{Any}(undef, length(combinations))
     active = findall(feasible)
     if !isempty(active)
         solved = _solve_stack(model, problem, combinations[active],
-            warm_start, deadline)
+            warm_start, time_limit)
         solved === nothing && (solved = _solve_nlps(nothing, model, problem,
-            sub.sequential, combinations[active], warm_start; deadline))
+            sub.sequential, combinations[active], warm_start; time_limit))
         results[active] .= solved
     end
     for i in findall(!, feasible)
@@ -351,14 +351,14 @@ function _solve_nlpf(
     problem::_Problem,
     combination::AbstractDict,
     warm_start;
-    deadline::Float64 = Inf
+    time_limit::Float64 = Inf
     )
     nlp = _instantiate(model.nlp_solver)
     variable_map, u = _add_slacked_copy(nlp, model, problem, combination)
     MOI.set(nlp, MOI.ObjectiveSense(), MOI.MIN_SENSE)
     MOI.set(nlp, MOI.ObjectiveFunction{MOI.VariableIndex}(), u)
     _set_warm_start(nlp, variable_map, warm_start)
-    _cap_remaining_time(nlp, deadline)
+    _cap_remaining_time(nlp, time_limit)
     MOI.optimize!(nlp)
     # Use the primal only at a genuine feasible point; a solver can
     # report values at a nonfeasible/NaN primal that hurts the cut.

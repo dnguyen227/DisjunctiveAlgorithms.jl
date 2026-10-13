@@ -134,7 +134,7 @@ function _activation_binary(activation::MOI.ScalarAffineFunction{Float64})
     return _indicator_error(activation)
 end
 
-function _parse_disjunction(
+function _read_disjunction(
     cache::_Cache,
     ci::MOI.ConstraintIndex{F, DisjunctionSet}
     ) where {F}
@@ -185,7 +185,7 @@ function _build_problem(model::Optimizer)
         cis = MOI.get(cache, MOI.ListOfConstraintIndices{FC, S}())
         if S === DisjunctionSet
             append!(disjunctions,
-                _parse_disjunction(cache, ci) for ci in cis)
+                _read_disjunction(cache, ci) for ci in cis)
         elseif FC === MOI.VariableIndex && S <: MOI.AbstractScalarSet
             append!(variable_cis, cis)
         elseif FC === MOI.ScalarAffineFunction{Float64} &&

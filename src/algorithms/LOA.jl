@@ -160,13 +160,13 @@ end
 # one target per (binary, value); linear disjuncts need no cover
 # since the master already carries them exactly
 function _cover_disjuncts(problem::_Problem)
-    seen = Set{Tuple{MOI.VariableIndex, Bool}}()
+    visited_disjunct_key = Set{Tuple{MOI.VariableIndex, Bool}}()
     cover = _Disjunct[]
     for disjunction in problem.disjunctions, disjunct in disjunction.disjuncts
         _is_nonlinear_disjunct(disjunct) || continue
-        key = (disjunct.binary, disjunct.active_value)
-        key in seen && continue
-        push!(seen, key)
+        disjunct_key = (disjunct.binary, disjunct.active_value)
+        disjunct_key in visited_disjunct_key && continue
+        push!(visited_disjunct_key, disjunct_key)
         push!(cover, disjunct)
     end
     return cover
@@ -184,15 +184,15 @@ _restore_objective(::MasterCover, master::_Master) =
     _set_master_objective(master, master.sense, master.oa_objective)
 
 # The logic model needs its own no-good cut to move on; the master
-# receives the combination's no-good cut from `process_result`
-_exclude_combination(::LogicOnlyCover, set_cover, combination) =
-    _avoid_combination(set_cover, combination)
-_exclude_combination(::MasterCover, set_cover, combination) = nothing
+# receives the combination's no-good cut from `apply_result`
+_exclude_combination(::LogicOnlyCover, covering_model, combination) =
+    _avoid_combination(covering_model, combination)
+_exclude_combination(::MasterCover, covering_model, combination) = nothing
 
 # Turkay and Grossmann's covering weights, as GDPopt uses them: an
 # uncovered disjunct outweighs all covered ones
 function _cover_objective(
-    set_cover::Union{_Master, _SetCoverModel},
+    covering_model::Union{_Master, _SetCoverModel},
     cover::Vector{_Disjunct},
     needs_cover,
     num_covered::Int
@@ -200,7 +200,7 @@ function _cover_objective(
     objective = MOI.ScalarAffineFunction(MOI.ScalarAffineTerm{Float64}[], 0.0)
     for i in eachindex(cover)
         weight = Float64(needs_cover[i] ? num_covered + 1 : 1)
-        activation = _map_to(set_cover.variable_map, cover[i].activation)
+        activation = _map_to(covering_model.variable_map, cover[i].activation)
         objective = MOI.Utilities.operate(+, Float64, objective,
             MOI.Utilities.operate(*, Float64, weight, activation))
     end
@@ -221,9 +221,9 @@ end
 function _solve_master(
     model::Optimizer,
     master::Union{_Master, _SetCoverModel},
-    deadline::Float64
+    time_limit::Float64
     )
-    _cap_remaining_time(master.model, deadline)
+    _cap_remaining_time(master.model, time_limit)
     model.master_time += @elapsed MOI.optimize!(master.model)
     model.num_master_solves += 1
     return _solved_and_feasible(master.model)
@@ -234,19 +234,20 @@ end
 # already added the no-good cuts (re-solving sources must), so the
 # caller skips them.
 function _extract_combinations(
-    source,
+    combination_source,
     model::Optimizer,
     problem::_Problem,
     master::_Master,
     incumbent,
     count::Int,
-    deadline::Float64
+    time_limit::Float64
     )
-    proposal = _extract_combination(problem, master)
-    count > 1 || return [proposal], false
-    extra, excluded = _candidate_combinations(source, model, problem,
-        master, proposal, incumbent, count - 1, deadline)
-    return [proposal; extra], excluded
+    master_combination = _extract_combination(problem, master)
+    count > 1 || return [master_combination], false
+    extra_candidates, cuts_added = _candidate_combinations(
+        combination_source, model, problem, master, master_combination,
+        incumbent, count - 1, time_limit)
+    return [master_combination; extra_candidates], cuts_added
 end
 
 function _set_master_objective(
@@ -272,39 +273,39 @@ function _optimize!(algorithm::LOA, model::Optimizer)
     _check_inner_support(method, model, problem)
     master = _build_master(model, problem)
     subproblem = _build_subproblem(method, model, problem)
-    linearizer = _Linearizer()
+    taylor_cache = _Linearizer()
     sense = problem.sense
-    overall_deadline = t_start + something(model.time_limit_sec, Inf)
-    loop_deadline = min(overall_deadline,
+    overall_time_limit = t_start + something(model.time_limit_sec, Inf)
+    loop_time_limit = min(overall_time_limit,
         t_start + Float64(MOI.get(algorithm, IterationTimeLimit())))
 
     best_objective = _worst_objective(sense)
-    best_result = nothing
+    incumbent_result = nothing
     previous_result = _user_start_values(model, problem)
     master_bound = nothing
     master_status = nothing
     converged = false
-    unbounded = false
-    num_unresolved = 0
+    is_unbounded = false
+    num_failed_nlps = 0
 
     # Shared iteration tail: no-good cut, OA cuts, incumbent update.
     # An unbounded NLP aborts the loops; a failed (neither feasible
     # nor proven-infeasible) NLP still gets its no-good cut so the
     # loop progresses, but is counted against the exhaustion claim.
-    process_result = (result; nogood = true) -> begin
+    apply_result = (result; nogood = true) -> begin
         if !result.feasible && _nlp_unbounded(result.status)
-            unbounded = true
+            is_unbounded = true
             return
         end
         result.feasible || _nlp_infeasible(result.status) ||
-            (num_unresolved += 1)
+            (num_failed_nlps += 1)
         result.feasible || (model.num_nlp_infeasible += 1)
         nogood && _avoid_combination(master, result.combination)
-        _add_oa_cuts(model, problem, master, linearizer, result)
+        _add_oa_cuts(model, problem, master, taylor_cache, result)
         if result.feasible &&
                 _is_better(sense, result.objective, best_objective)
             best_objective = result.objective
-            best_result = result
+            incumbent_result = result
         end
         result.feasible && (previous_result = result)
         _log_progress(model, t_start, best_objective, master_bound)
@@ -320,14 +321,15 @@ function _optimize!(algorithm::LOA, model::Optimizer)
     needs_cover = trues(length(cover))
     num_covered = 0
     covering_algorithm = MOI.get(algorithm, SetCoverProblem())
-    set_cover = _set_cover_model(covering_algorithm, model, problem, master)
+    covering_model = _set_cover_model(covering_algorithm, model, problem,
+        master)
     for iteration in 1:MOI.get(algorithm, SetCoverIterationLimit())
         (iteration == 1 || any(needs_cover)) || break
-        time() < loop_deadline || break
-        _set_master_objective(set_cover, MOI.MAX_SENSE,
-            _cover_objective(set_cover, cover, needs_cover, num_covered))
-        solved = _solve_master(model, set_cover, loop_deadline)
-        combination = solved ? _extract_combination(problem, set_cover) :
+        time() < loop_time_limit || break
+        _set_master_objective(covering_model, MOI.MAX_SENSE,
+            _cover_objective(covering_model, cover, needs_cover, num_covered))
+        solved = _solve_master(model, covering_model, loop_time_limit)
+        combination = solved ? _extract_combination(problem, covering_model) :
             nothing
         _restore_objective(covering_algorithm, master)
         solved || break
@@ -335,14 +337,14 @@ function _optimize!(algorithm::LOA, model::Optimizer)
         iteration == 1 || any(needs_cover[i] &&
             _disjunct_active(combination, cover[i])
             for i in eachindex(cover)) || break
-        _exclude_combination(covering_algorithm, set_cover, combination)
+        _exclude_combination(covering_algorithm, covering_model, combination)
         t_nlp = time()
         result = _solve_nlp(method, model, problem, subproblem,
-            combination, warm_start(); deadline = loop_deadline)
+            combination, warm_start(); time_limit = loop_time_limit)
         model.nlp_time += time() - t_nlp
         model.num_nlp_solves += 1
-        process_result(result)
-        unbounded && break
+        apply_result(result)
+        is_unbounded && break
         # covered only once active in a feasible NLP; infeasible
         # combinations just leave their no-good cut
         if result.feasible
@@ -356,16 +358,16 @@ function _optimize!(algorithm::LOA, model::Optimizer)
     end
 
     # main loop: alpha_oa gives the bound, the NLP the incumbent
-    if master_status === nothing && !unbounded
+    if master_status === nothing && !is_unbounded
         for _ in 1:MOI.get(algorithm, NumIterationLimit())
-            time() < loop_deadline || break
-            if !_solve_master(model, master, loop_deadline)
+            time() < loop_time_limit || break
+            if !_solve_master(model, master, loop_time_limit)
                 master_status = MOI.get(master.model, MOI.TerminationStatus())
                 break
             end
             master_bound = MOI.get(master.model, MOI.VariablePrimal(),
                 master.alpha_oa)
-            if best_result !== nothing
+            if incumbent_result !== nothing
                 gap = _gap(sense, best_objective, master_bound)
                 total_slack = abs(MOI.get(master.model,
                     MOI.ObjectiveValue()) - master_bound) /
@@ -378,26 +380,27 @@ function _optimize!(algorithm::LOA, model::Optimizer)
                     break
                 end
             end
-            combinations, excluded = _extract_combinations(
+            combinations, cuts_added = _extract_combinations(
                 MOI.get(algorithm, CombinationSource()), model, problem,
-                master, best_result === nothing ? nothing :
-                    best_result.combination,
-                MOI.get(algorithm, MultiGenerationSize()), loop_deadline)
+                master, incumbent_result === nothing ? nothing :
+                    incumbent_result.combination,
+                MOI.get(algorithm, MultiGenerationSize()), loop_time_limit)
             t_nlp = time()
             results = _solve_nlps(method, model, problem, subproblem,
-                combinations, warm_start(); deadline = loop_deadline)
+                combinations, warm_start(); time_limit = loop_time_limit)
             model.nlp_time += time() - t_nlp
             model.num_nlp_solves += length(results)
             for result in results
-                process_result(result; nogood = !excluded)
-                unbounded && break
+                apply_result(result; nogood = !cuts_added)
+                is_unbounded && break
             end
-            unbounded && break
+            is_unbounded && break
         end
     end
 
-    _store_results(model, sense, best_objective, best_result, master_bound,
-        master_status, converged, unbounded, num_unresolved, loop_deadline)
+    _store_results(model, sense, best_objective, incumbent_result,
+        master_bound, master_status, converged, is_unbounded, num_failed_nlps,
+        loop_time_limit)
     model.solve_time = time() - t_start
     return
 end
@@ -411,16 +414,16 @@ function _store_results(
     model::Optimizer,
     sense::MOI.OptimizationSense,
     best_objective::Float64,
-    best_result,
+    incumbent_result,
     master_bound,
     master_status,
     converged::Bool,
-    unbounded::Bool,
-    num_unresolved::Int,
-    loop_deadline::Float64
+    is_unbounded::Bool,
+    num_failed_nlps::Int,
+    loop_time_limit::Float64
     )
-    timed_out = time() >= loop_deadline
-    if unbounded
+    timed_out = time() >= loop_time_limit
+    if is_unbounded
         model.termination_status = MOI.DUAL_INFEASIBLE
         model.primal_status = MOI.NO_SOLUTION
         model.objective_value = NaN
@@ -428,11 +431,11 @@ function _store_results(
             "combination is unbounded, so the model is unbounded."
         return
     end
-    if best_result === nothing
+    if incumbent_result === nothing
         model.primal_status = MOI.NO_SOLUTION
         model.objective_value = NaN
         model.raw_status = "No feasible incumbent found."
-        if master_status == MOI.INFEASIBLE && num_unresolved == 0
+        if master_status == MOI.INFEASIBLE && num_failed_nlps == 0
             model.termination_status = MOI.INFEASIBLE
             model.raw_status = "No feasible incumbent: the master " *
                 "problem is infeasible."
@@ -441,7 +444,7 @@ function _store_results(
             # combination never solved to a certificate
             model.termination_status = MOI.OTHER_LIMIT
             model.raw_status = "No feasible incumbent: the master " *
-                "is infeasible, but $num_unresolved combination(s) " *
+                "is infeasible, but $num_failed_nlps combination(s) " *
                 "failed without an infeasibility certificate."
         elseif timed_out
             model.termination_status = MOI.TIME_LIMIT
@@ -460,16 +463,17 @@ function _store_results(
         return
     end
     model.primal_status = MOI.FEASIBLE_POINT
-    model.incumbent = best_result.point
+    model.incumbent = incumbent_result.point
     model.objective_value = best_objective
     model.objective_bound = master_bound === nothing ? nothing :
         Float64(master_bound)
-    exhausted = master_status == MOI.INFEASIBLE && num_unresolved == 0
+    combinations_exhausted = master_status == MOI.INFEASIBLE &&
+        num_failed_nlps == 0
     if converged
         model.termination_status = MOI.LOCALLY_SOLVED
     elseif timed_out
         model.termination_status = MOI.TIME_LIMIT
-    elseif exhausted
+    elseif combinations_exhausted
         # all combinations visited; the incumbent is best over all
         # of them, but the OA bound is gone
         model.termination_status = MOI.LOCALLY_SOLVED
@@ -482,21 +486,21 @@ function _store_results(
     else
         model.termination_status = MOI.ITERATION_LIMIT
     end
-    label = converged ? "converged" :
-        exhausted ? "combinations exhausted" :
+    outcome_label = converged ? "converged" :
+        combinations_exhausted ? "combinations exhausted" :
         master_status == MOI.INFEASIBLE ? "combinations exhausted, " *
-            "$num_unresolved unresolved" : "limit hit"
+            "$num_failed_nlps unresolved" : "limit hit"
     if master_bound === nothing
-        model.raw_status = "LOA finished [$label]: incumbent " *
+        model.raw_status = "LOA finished [$outcome_label]: incumbent " *
             "$best_objective (master produced no bound)."
     else
         gap = _gap(sense, best_objective, master_bound)
-        relative = abs(best_objective) > 1e-10 ?
+        relative_gap = abs(best_objective) > 1e-10 ?
             gap / abs(best_objective) : gap
-        model.relative_gap = relative
-        model.raw_status = "LOA finished [$label]: incumbent " *
+        model.relative_gap = relative_gap
+        model.raw_status = "LOA finished [$outcome_label]: incumbent " *
             "$best_objective, master bound $master_bound, gap $gap " *
-            "(relative $relative)."
+            "(relative $relative_gap)."
     end
     return
 end

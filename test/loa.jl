@@ -1042,10 +1042,10 @@ end
 
 function DA._solve_nlp(m::_RecordingSubproblems, model::DA.Optimizer,
     problem::DA._Problem, sub, combination, warm_start;
-    deadline::Float64 = Inf)
+    time_limit::Float64 = Inf)
     push!(m.log, :solve)
     return DA._solve_nlp(nothing, model, problem, sub, combination,
-        warm_start; deadline)
+        warm_start; time_limit)
 end
 
 function test_subproblem_method_dispatch()
