@@ -13,11 +13,6 @@ disjunctions encoded as vector constraints in
 (currently logic-based outer approximation) solve the model by
 dispatching subproblems to user-provided MIP and NLP solvers.
 
-The design follows
-[MultiObjectiveAlgorithms.jl](https://github.com/jump-dev/MultiObjectiveAlgorithms.jl):
-one `Optimizer` that wraps inner solvers, with the algorithm and its
-options selected through optimizer attributes.
-
 ## Installation
 
 DisjunctiveAlgorithms needs the `DisjunctionSet` set and the `Direct()`
