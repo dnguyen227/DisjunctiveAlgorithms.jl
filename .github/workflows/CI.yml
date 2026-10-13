@@ -37,11 +37,6 @@ jobs:
           version: ${{ matrix.version }}
           arch: ${{ matrix.arch }}
       - uses: julia-actions/cache@v2
-      # DisjunctionSet ships in an unreleased DisjunctiveProgramming:
-      # add it from the gdp_optimizer branch until a DP release
-      - name: Add unreleased DisjunctiveProgramming
-        run: julia --project=. -e 'using Pkg; Pkg.add(PackageSpec(url="https://github.com/dnguyen227/DisjunctiveProgramming.jl", rev="gdp_optimizer"))'
-        shell: bash
       - uses: julia-actions/julia-buildpkg@v1
       - uses: julia-actions/julia-runtest@v1
       - uses: julia-actions/julia-processcoverage@v1
@@ -63,13 +58,6 @@ jobs:
         with:
           version: '1'
       - uses: julia-actions/cache@v2
-      # DisjunctionSet ships in an unreleased DisjunctiveProgramming:
-      # add it from the gdp_optimizer branch until a DP release
-      - name: Add unreleased DisjunctiveProgramming
-        run: |
-          julia --project=. -e 'using Pkg; Pkg.add(PackageSpec(url="https://github.com/dnguyen227/DisjunctiveProgramming.jl", rev="gdp_optimizer"))'
-          julia --project=docs -e 'using Pkg; Pkg.develop(PackageSpec(path=pwd())); Pkg.add(PackageSpec(url="https://github.com/dnguyen227/DisjunctiveProgramming.jl", rev="gdp_optimizer")); Pkg.instantiate()'
-        shell: bash
       - uses: julia-actions/julia-buildpkg@v1
       - uses: julia-actions/julia-docdeploy@v1
         env:

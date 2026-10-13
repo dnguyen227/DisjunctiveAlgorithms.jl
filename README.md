@@ -15,17 +15,17 @@ dispatching subproblems to user-provided MIP and NLP solvers.
 
 ## Installation
 
-DisjunctiveAlgorithms needs the `DisjunctionSet` set and the `Direct()`
-reformulation, which live on DisjunctiveProgramming's `gdp_optimizer`
-branch and are not in a registered release yet. Until they ship,
-install the branch first:
+DisjunctiveAlgorithms is not registered yet, so install it from this
+repository. It requires DisjunctiveProgramming 0.7 or later, which
+ships the `DisjunctionSet` set and the `Direct()` reformulation; the
+package manager resolves that version automatically.
 
 ```julia
 import Pkg
-Pkg.add(url = "https://github.com/dnguyen227/DisjunctiveProgramming.jl",
-    rev = "gdp_optimizer")
 Pkg.add(url = "https://github.com/infiniteopt/DisjunctiveAlgorithms.jl")
 ```
+
+Supported Julia versions: 1.10 and later.
 
 ## Usage with DisjunctiveProgramming.jl
 
@@ -46,3 +46,19 @@ optimize!(model, gdp_method = Direct())
 `Direct()` lowers each disjunction to a single
 `DisjunctionSet` constraint that this package consumes directly; no
 Big-M or Hull reformulation is performed on the modeling side.
+
+## Options
+
+The algorithm is selected with the `Algorithm` attribute (default
+`LOA()`) and configured through the attributes it documents, set with
+`set_attribute`:
+
+```julia
+set_attribute(model, DA.NumIterationLimit(), 20)
+set_attribute(model, DA.ConvergenceTolerance(), 1e-4)
+```
+
+The `LOA` docstring lists every supported attribute. After a solve,
+`DA.MasterSolveCount()`, `DA.NLPSolveCount()`, `DA.MasterSolveTime()`
+and `DA.NLPSolveTime()` report the work done alongside the standard
+MOI result attributes.
