@@ -1,6 +1,6 @@
 name = "DisjunctiveAlgorithms"
 uuid = "af3b8e3a-4098-461f-b6c0-2c9706adb26e"
-authors = ["Daniel Nguyen, Joshua Pulsipher"]
+authors = ["Daniel Nguyen", "Joshua Pulsipher"]
 version = "0.1.0"
 
 [deps]

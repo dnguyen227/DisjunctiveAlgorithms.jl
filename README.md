@@ -15,14 +15,14 @@ dispatching subproblems to user-provided MIP and NLP solvers.
 
 ## Installation
 
-DisjunctiveAlgorithms is not registered yet, so install it from this
-repository. It requires DisjunctiveProgramming 0.7 or later, which
-ships the `DisjunctionSet` set and the `Direct()` reformulation; the
-package manager resolves that version automatically.
+DisjunctiveAlgorithms is registered in the General registry. It
+requires DisjunctiveProgramming 0.7 or later, which ships the
+`DisjunctionSet` set and the `Direct()` reformulation; the package
+manager resolves that version automatically.
 
 ```julia
 import Pkg
-Pkg.add(url = "https://github.com/infiniteopt/DisjunctiveAlgorithms.jl")
+Pkg.add("DisjunctiveAlgorithms")
 ```
 
 Supported Julia versions: 1.10 and later.

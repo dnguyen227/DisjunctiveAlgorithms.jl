@@ -5,7 +5,7 @@ DocMeta.setdocmeta!(DisjunctiveAlgorithms, :DocTestSetup, :(using DisjunctiveAlg
 
 makedocs(;
     modules=[DisjunctiveAlgorithms],
-    authors="Daniel Nguyen",
+    authors="Daniel Nguyen, Joshua Pulsipher",
     sitename="DisjunctiveAlgorithms.jl",
     format=Documenter.HTML(;
         canonical="https://infiniteopt.github.io/DisjunctiveAlgorithms.jl",
