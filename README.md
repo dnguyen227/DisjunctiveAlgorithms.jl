@@ -1,6 +1,5 @@
 # DisjunctiveAlgorithms.jl
 
-[![Stable](https://img.shields.io/badge/docs-stable-blue.svg)](https://infiniteopt.github.io/DisjunctiveAlgorithms.jl/stable/)
 [![Dev](https://img.shields.io/badge/docs-dev-blue.svg)](https://infiniteopt.github.io/DisjunctiveAlgorithms.jl/dev/)
 [![Build Status](https://github.com/infiniteopt/DisjunctiveAlgorithms.jl/actions/workflows/CI.yml/badge.svg?branch=main)](https://github.com/infiniteopt/DisjunctiveAlgorithms.jl/actions/workflows/CI.yml?query=branch%3Amain)
 [![Coverage](https://codecov.io/gh/infiniteopt/DisjunctiveAlgorithms.jl/branch/main/graph/badge.svg)](https://codecov.io/gh/infiniteopt/DisjunctiveAlgorithms.jl)
