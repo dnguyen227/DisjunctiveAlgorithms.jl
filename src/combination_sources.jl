@@ -281,13 +281,14 @@ function _bound_unit_interval(lp::MOI.ModelLike, vi::MOI.VariableIndex)
     return
 end
 
-# weighted draw; uniform when the weights carry no information
+# weighted draw; uniform when the weights carry no information; the
+# last disjunct takes whatever remains past the others
 function _sample(rng, disjuncts, weights)
     total = sum(weights)
     total > 0 || return rand(rng, disjuncts)
     threshold = rand(rng) * total
     running = 0.0
-    for (disjunct, w) in zip(disjuncts, weights)
+    for (disjunct, w) in zip(disjuncts[1:(end - 1)], weights)
         running += w
         running >= threshold && return disjunct
     end

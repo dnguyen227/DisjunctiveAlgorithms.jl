@@ -10,13 +10,15 @@
 # set-cover model).
 # Deterministic triggers for the deadline and abnormal-master paths.
 # `strict_constants` imitates direct wrappers (e.g. Gurobi) that reject
-# scalar functions with nonzero constants.
+# scalar functions with nonzero constants. `pool_size > 1` imitates a
+# solution pool (Gurobi's PoolSolutions) holding copies of result 1.
 mutable struct MockSolver <: MOI.AbstractOptimizer
     inner::MOI.AbstractOptimizer
     sleep_time::Float64
     fail_from::Int
     fail_status::MOI.TerminationStatusCode
     strict_constants::Bool
+    pool_size::Int
     solves::Int
     shared_solves::Ref{Int}
     failing::Bool
@@ -28,10 +30,11 @@ function MockSolver(
     fail_from::Int = typemax(Int),
     fail_status::MOI.TerminationStatusCode = MOI.NODE_LIMIT,
     strict_constants::Bool = false,
+    pool_size::Int = 1,
     shared_solves::Ref{Int} = Ref(0)
     )
     return MockSolver(MOI.instantiate(factory), sleep_time, fail_from,
-        fail_status, strict_constants, 0, shared_solves, false)
+        fail_status, strict_constants, pool_size, 0, shared_solves, false)
 end
 
 function MOI.optimize!(model::MockSolver)
@@ -54,6 +57,8 @@ function MOI.get(model::MockSolver, attr::_WrappedAttr)
         attr isa MOI.TerminationStatus && return model.fail_status
         attr isa MOI.PrimalStatus && return MOI.NO_SOLUTION
     end
+    attr isa MOI.ResultCount &&
+        return model.pool_size * MOI.get(model.inner, attr)
     return MOI.get(model.inner, attr)
 end
 
@@ -109,6 +114,8 @@ function MOI.get(
     attr::_WrappedIndexAttr,
     index::_WrappedIndex
     )
+    attr isa MOI.VariablePrimal && attr.result_index <= model.pool_size &&
+        return MOI.get(model.inner, MOI.VariablePrimal(), index)
     return MOI.get(model.inner, attr, index)
 end
 

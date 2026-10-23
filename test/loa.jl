@@ -787,6 +787,39 @@ function test_nlp_failure_unresolved()
     @test occursin("1 unresolved", raw_status(model))
 end
 
+# Every NLP fails without a certificate: the master exhausts the
+# combinations, but with no incumbent that is not an infeasibility
+# proof.
+function test_nlp_failure_no_incumbent()
+    factory = () -> DA.Optimizer(
+        () -> MockSolver(Ipopt.Optimizer;
+            fail_from = 1, fail_status = MOI.NUMERICAL_ERROR),
+        HiGHS.Optimizer)
+    model = Model(factory)
+    set_silent(model)
+    @variable(model, 0 <= x <= 10)
+    @variable(model, z[1:2], Bin)
+    @constraint(model, [1, z[1], z[2], x^2, x^2] in DA.DisjunctionSet([
+        [MOI.GreaterThan(4.0)], [MOI.GreaterThan(25.0)]]))
+    @objective(model, Min, x)
+    optimize!(model)
+    @test termination_status(model) == MOI.OTHER_LIMIT
+    @test primal_status(model) == MOI.NO_SOLUTION
+    @test occursin("2 combination(s) failed", raw_status(model))
+end
+
+# A run that is not silent logs one progress record per NLP solve.
+function test_progress_log()
+    model = Model(_loa_optimizer())
+    @variable(model, 0 <= x <= 10)
+    @variable(model, z[1:2], Bin)
+    @constraint(model, [1, z[1], z[2], x, x] in DA.DisjunctionSet([
+        [MOI.GreaterThan(2.0)], [MOI.GreaterThan(5.0)]]))
+    @objective(model, Min, x)
+    @test_logs (:info, r"LOA progress") match_mode = :any optimize!(model)
+    @test objective_value(model) ≈ 2.0 atol = 1e-5
+end
+
 # Bad attribute values fail at set time, not mid-solve.
 function test_attribute_validation()
     algorithm = DA.LOA()
@@ -1066,6 +1099,111 @@ function test_subproblem_method_dispatch()
     @test MOI.get(unsafe_backend(model), DA.SubproblemMethod()) === method
 end
 
+# A subproblem method without its own `_check_nlp_support` brings its
+# own solver, so the nlp_solver check is skipped; HiGHS as the
+# nlp_solver would reject the quadratic disjunct row.
+struct _UncheckedSubproblems end
+
+function test_subproblem_method_skips_nlp_check()
+    model = Model(() -> DA.Optimizer(HiGHS.Optimizer))
+    @variable(model, 0 <= x <= 4)
+    @variable(model, z[1:2], Bin)
+    @constraint(model, [1, z[1], z[2], x^2, x] in DA.DisjunctionSet([
+        [MOI.LessThan(4.0)], [MOI.LessThan(1.0)]]))
+    @objective(model, Min, x)
+    MOI.Utilities.attach_optimizer(model)
+    optimizer = unsafe_backend(model)
+    problem = DA._build_problem(optimizer)
+    @test_throws ErrorException DA._check_inner_support(nothing, optimizer,
+        problem)
+    @test DA._check_inner_support(_UncheckedSubproblems(), optimizer,
+        problem) === nothing
+end
+
+# Operator trees demote by degree: powers of a variable or a constant,
+# constant products folded, and typed rows nested as arguments.
+function test_demote_operator_trees()
+    x = MOI.VariableIndex(1)
+    tree(head, args...) = MOI.ScalarNonlinearFunction(head, Any[args...])
+    affine(a, c) = MOI.ScalarAffineFunction([MOI.ScalarAffineTerm(a, x)], c)
+    constant(c) = MOI.ScalarAffineFunction(MOI.ScalarAffineTerm{Float64}[], c)
+    square = MOI.Utilities.operate(*, Float64, x, x)
+    @test DA._demote(tree(:^, x, 2)) ≈ square
+    @test DA._demote(tree(:^, x, 1)) ≈ affine(1.0, 0.0)
+    @test DA._demote(tree(:^, x, 0)) ≈ constant(1.0)
+    @test DA._demote(tree(:^, 3.0, 2)) ≈ constant(9.0)
+    @test DA._demote(tree(:*, 2.0, 3.0, x)) ≈ affine(6.0, 0.0)
+    @test DA._degree(square) == 2
+    nested = DA._demote(tree(:+, square, affine(2.0, 1.0)))
+    @test nested ≈ MOI.Utilities.operate(+, Float64, square, affine(2.0, 1.0))
+end
+
+# A master with a solution pool supplies the extra combinations from
+# result indices past 1 with no re-solve and no no-good cut; a pool
+# entry equal to the proposal is dropped.
+function test_pool_candidates()
+    mip = () -> MockSolver(HiGHS.Optimizer, pool_size = 2)
+    model = Model(() -> DA.Optimizer(Ipopt.Optimizer, mip))
+    @variable(model, 0 <= x <= 10)
+    @variable(model, z[1:2], Bin)
+    @constraint(model, [1, z[1], z[2], x, x] in DA.DisjunctionSet([
+        [MOI.GreaterThan(2.0)], [MOI.GreaterThan(5.0)]]))
+    @objective(model, Min, x)
+    MOI.Utilities.attach_optimizer(model)
+    optimizer = unsafe_backend(model)
+    problem = DA._build_problem(optimizer)
+    master = DA._build_master(optimizer, problem)
+    MOI.add_constraint(master.model, master.alpha_oa, MOI.GreaterThan(0.0))
+    @test DA._solve_master(optimizer, master, Inf)
+    @test MOI.get(master.model, MOI.ResultCount()) == 2
+    solution = DA._extract_combination(problem, master)
+    other = only(c for c in _all_combinations(problem) if c != solution)
+    no_goods = MOI.NumberOfConstraints{MOI.ScalarAffineFunction{Float64},
+        MOI.GreaterThan{Float64}}()
+    rows = MOI.get(master.model, no_goods)
+    candidates, excluded = DA._candidate_combinations(nothing, optimizer,
+        problem, master, other, nothing, 1, Inf)
+    @test !excluded
+    @test candidates == [solution]
+    dropped, excluded = DA._candidate_combinations(nothing, optimizer,
+        problem, master, solution, nothing, 1, Inf)
+    @test !excluded
+    @test isempty(dropped)
+    @test MOI.get(optimizer, DA.MasterSolveCount()) == 1
+    @test MOI.get(master.model, no_goods) == rows
+end
+
+# More neighbors than asked for: an evenly spaced subset. One
+# disjunction of four gives three neighbors; two are asked for.
+function test_neighborhood_subset()
+    model = Model(_loa_optimizer())
+    @variable(model, 0 <= x <= 10)
+    @variable(model, z[1:4], Bin)
+    @constraint(model, [1, z..., x, x, x, x] in DA.DisjunctionSet(
+        [[MOI.LessThan(Float64(k))] for k in 1:4]))
+    @objective(model, Min, x)
+    MOI.Utilities.attach_optimizer(model)
+    optimizer = unsafe_backend(model)
+    problem = DA._build_problem(optimizer)
+    master = DA._build_master(optimizer, problem)
+    disjuncts = only(problem.disjunctions).disjuncts
+    proposal = DA._combination(problem, disjuncts[1:1])
+    neighbors, excluded = DA._candidate_combinations(DA.Neighborhood(),
+        optimizer, problem, master, proposal, nothing, 2, Inf)
+    @test !excluded
+    @test [only(DA._active_disjuncts(problem, n)) for n in neighbors] ==
+        disjuncts[[2, 4]]
+end
+
+# The weighted draw follows the weights to either end of the list.
+function test_sample_weights()
+    rng = DA.Random.MersenneTwister(0)
+    @test DA._sample(rng, [:first, :last], [1.0, 0.0]) == :first
+    @test DA._sample(rng, [:first, :last], [0.0, 1.0]) == :last
+    @test DA._sample(rng, [:only], [1.0]) == :only
+    @test DA._sample(rng, [:first, :last], [0.0, 0.0]) in (:first, :last)
+end
+
 @testset "LOA loop" begin
     test_linear_disjunction()
     test_row_function_constants()
@@ -1100,6 +1238,8 @@ end
     test_master_abnormal_status()
     test_unbounded_model()
     test_nlp_failure_unresolved()
+    test_nlp_failure_no_incumbent()
+    test_progress_log()
     test_attribute_validation()
     test_nonlinear_indicator_error()
     test_strict_constant_solvers()
@@ -1121,4 +1261,9 @@ end
     test_activation_binary()
     test_sense_primitives()
     test_linearize_quadratic()
+    test_subproblem_method_skips_nlp_check()
+    test_demote_operator_trees()
+    test_pool_candidates()
+    test_neighborhood_subset()
+    test_sample_weights()
 end
