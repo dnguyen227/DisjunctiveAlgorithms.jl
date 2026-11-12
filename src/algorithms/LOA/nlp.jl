@@ -5,7 +5,7 @@
 # `nothing`; a method object routes `_build_subproblem`/`_solve_nlp`
 # to its own construction (see the `SubproblemMethod` docstring).
 # Built once; each iteration overwrites the binary fixes in place
-# and swaps the active disjuncts' rows. No big-M anywhere.
+# and, for the default method, swaps the active disjuncts' rows.
 struct _Subproblem
     model::MOI.ModelLike
     variable_map::Dict{MOI.VariableIndex, MOI.VariableIndex}
@@ -15,9 +15,14 @@ struct _Subproblem
 end
 
 # One copy of the variables, bounds, binary fixes (at 0 until a
-# combination is set), and global rows; disjunct rows depend on the
-# combination and are the caller's.
-function _add_copy(nlp::MOI.ModelLike, model::Optimizer, problem::_Problem)
+# combination is set), and global rows, relaxed by `slack` when given;
+# disjunct rows depend on the combination and are the caller's.
+function _add_copy(
+    nlp::MOI.ModelLike,
+    model::Optimizer,
+    problem::_Problem,
+    slack = nothing
+    )
     variable_map = Dict{MOI.VariableIndex, MOI.VariableIndex}(
         vi => MOI.add_variable(nlp) for vi in problem.variables)
     indicators = Set(problem.binaries)
@@ -31,13 +36,36 @@ function _add_copy(nlp::MOI.ModelLike, model::Optimizer, problem::_Problem)
         MOI.EqualTo(0.0)) for binary in problem.binaries)
     for ci in problem.linear_cis
         func = MOI.get(model.cache, MOI.ConstraintFunction(), ci)
-        MOI.add_constraint(nlp, _map_to(variable_map, func),
-            MOI.get(model.cache, MOI.ConstraintSet(), ci))
+        _add_row(nlp, _map_to(variable_map, func),
+            MOI.get(model.cache, MOI.ConstraintSet(), ci), slack)
     end
     for (func, set) in problem.nonlinear_rows
-        MOI.add_constraint(nlp, _map_to(variable_map, func), set)
+        _add_row(nlp, _map_to(variable_map, func), set, slack)
     end
     return variable_map, fixes
+end
+
+# `func in set`, relaxed by the nonnegative `relaxation` when given
+_add_row(nlp::MOI.ModelLike, func, set, ::Nothing) =
+    MOI.add_constraint(nlp, func, set)
+function _add_row(nlp::MOI.ModelLike, func, set, relaxation)
+    for (relaxed, relaxed_set) in _relaxed_rows(func, relaxation, set)
+        MOI.add_constraint(nlp, relaxed, relaxed_set)
+    end
+    return
+end
+
+# Overwrite the binary fixes with the combination's 0/1 values
+function _set_fixes(
+    nlp::MOI.ModelLike,
+    fixes::AbstractDict,
+    combination::AbstractDict
+    )
+    for (binary, value) in combination
+        MOI.set(nlp, MOI.ConstraintSet(), fixes[binary],
+            MOI.EqualTo(value ? 1.0 : 0.0))
+    end
+    return
 end
 
 # Point one copy at a combination: overwrite its binary fixes and add
@@ -49,10 +77,7 @@ function _fix_combination(
     problem::_Problem,
     combination::AbstractDict
     )
-    for (binary, value) in combination
-        MOI.set(nlp, MOI.ConstraintSet(), fixes[binary],
-            MOI.EqualTo(value ? 1.0 : 0.0))
-    end
+    _set_fixes(nlp, fixes, combination)
     rows = MOI.ConstraintIndex[]
     for disjunction in problem.disjunctions, disjunct in disjunction.disjuncts
         _disjunct_active(combination, disjunct) || continue
@@ -109,6 +134,21 @@ function _solve_nlp(
     end
     append!(empty!(sub.rows), _fix_combination(sub.model, sub.variable_map,
         sub.fixes, problem, combination))
+    return _optimize_subproblem(model, problem, sub, nothing, combination,
+        warm_start, time_limit)
+end
+
+# Optimize a subproblem already pointed at `combination`; an infeasible
+# one falls through to NLPF on `feasibility` (`nothing` builds it fresh)
+function _optimize_subproblem(
+    model::Optimizer,
+    problem::_Problem,
+    sub::_Subproblem,
+    feasibility,
+    combination::AbstractDict,
+    warm_start,
+    time_limit::Float64
+    )
     _set_warm_start(sub.model, sub.variable_map, warm_start)
     _cap_remaining_time(sub.model, time_limit)
     MOI.optimize!(sub.model)
@@ -120,8 +160,8 @@ function _solve_nlp(
             feasible = true, status = status)
     end
     if Bool(MOI.get(model, UseNLPF()))
-        result = _solve_nlpf(model, problem, combination, warm_start;
-            time_limit = time_limit)
+        result = _solve_nlpf(feasibility, model, problem, combination,
+            warm_start; time_limit = time_limit)
         result === nothing || return (; result..., status = status)
     end
     return (combination = combination,
@@ -141,6 +181,137 @@ function _solve_nlps(
     )
     return [_solve_nlp(method, model, problem, sub, combination, warm_start;
         time_limit) for combination in combinations]
+end
+
+################################################################################
+#                      FIXED-STRUCTURE SUBPROBLEMS
+################################################################################
+"""
+    FixedStructureSubproblems()
+
+`SubproblemMethod` value that builds the NLP once with every disjunct
+row present. Each disjunct gets one relaxation variable `r` and its
+rows are relaxed by it (`g(x) - r <= ub`, `g(x) + r >= lb`). A
+combination only rewrites fixed values: `r` at 0 for an active
+disjunct, at the [`M_Value`](@ref) for an inactive one, and the
+indicator binaries at 0 or 1. The rows never change, so every solve
+sees the same model structure, which is what GPU solvers built on
+generated kernels need to reuse them. `M` stays out of the row
+bounds, so a solver's relative bound relaxation does not loosen the
+active rows. With [`UseNLPF`](@ref), the feasibility NLP for an
+infeasible combination is a second model built the same way once, with
+every row also relaxed by one minimized slack.
+
+Unlike the default method, which adds only the active rows:
+- `M_Value` must bound the violation of every inactive disjunct row,
+  nonlinear ones included, over the variable bounds. A row it does not
+  bound makes a feasible combination look infeasible.
+- Inactive rows are still evaluated, so a row defined on part of the
+  domain only (`log(x - 1)`, `sqrt(x)`) can fail outside it.
+- An equality or interval row becomes two inequalities. When active
+  they meet with opposite gradients, which interior-point solvers can
+  find degenerate.
+"""
+struct FixedStructureSubproblems end
+
+# One fixed-structure NLP and its disjuncts' relaxation fixes
+struct _RelaxedNLP
+    subproblem::_Subproblem
+    relaxation_fixes::Vector{Tuple{_Disjunct, MOI.ConstraintIndex{
+        MOI.VariableIndex, MOI.EqualTo{Float64}}}}
+end
+
+# The optimality NLP and, with `UseNLPF`, its feasibility twin: every
+# row also relaxed by one slack, slack minimized
+struct _FixedStructureSubproblem
+    optimality::_RelaxedNLP
+    feasibility::Union{_RelaxedNLP, Nothing}
+end
+
+_check_nlp_support(
+    method::FixedStructureSubproblems,
+    model::Optimizer,
+    problem::_Problem
+    ) = _check_nlp_solver(method, model, problem)
+
+# relaxed rows are `<=` or `>=`; a VariableIndex row becomes affine
+function _disjunct_row_types(::FixedStructureSubproblems, func, set)
+    row_type = func isa MOI.VariableIndex ?
+        MOI.ScalarAffineFunction{Float64} : typeof(func)
+    return [(row_type, MOI.LessThan{Float64}),
+        (row_type, MOI.GreaterThan{Float64})]
+end
+
+# Every disjunct row relaxed by its disjunct's fixed `r` (plus `slack`
+# when given); the objective is `slack` if given, else the problem's
+function _build_relaxed_nlp(model::Optimizer, problem::_Problem, slack::Bool)
+    nlp = _instantiate(model.nlp_solver)
+    slack_vref = nothing
+    if slack
+        slack_vref = MOI.add_variable(nlp)
+        MOI.add_constraint(nlp, slack_vref, MOI.GreaterThan(0.0))
+    end
+    variable_map, fixes = _add_copy(nlp, model, problem, slack_vref)
+    M = Float64(MOI.get(model, M_Value()))
+    relaxation_fixes = Tuple{_Disjunct, MOI.ConstraintIndex{
+        MOI.VariableIndex, MOI.EqualTo{Float64}}}[]
+    for disjunction in problem.disjunctions, disjunct in disjunction.disjuncts
+        relaxation_vref = MOI.add_variable(nlp)
+        fix = MOI.add_constraint(nlp, relaxation_vref, MOI.EqualTo(M))
+        push!(relaxation_fixes, (disjunct, fix))
+        relaxation = slack ? _combine(+, relaxation_vref, slack_vref) :
+            relaxation_vref
+        for (func, set) in zip(disjunct.functions, disjunct.sets)
+            _add_row(nlp, _map_to(variable_map, func), set, relaxation)
+        end
+    end
+    if slack
+        MOI.set(nlp, MOI.ObjectiveSense(), MOI.MIN_SENSE)
+        MOI.set(nlp, MOI.ObjectiveFunction{MOI.VariableIndex}(), slack_vref)
+    else
+        MOI.set(nlp, MOI.ObjectiveSense(), problem.sense)
+        objective = _map_to(variable_map, problem.objective)
+        MOI.set(nlp, MOI.ObjectiveFunction{typeof(objective)}(), objective)
+    end
+    subproblem = _Subproblem(nlp, variable_map, fixes, MOI.ConstraintIndex[])
+    return _RelaxedNLP(subproblem, relaxation_fixes)
+end
+
+function _build_subproblem(
+    ::FixedStructureSubproblems,
+    model::Optimizer,
+    problem::_Problem
+    )
+    feasibility = Bool(MOI.get(model, UseNLPF())) ?
+        _build_relaxed_nlp(model, problem, true) : nothing
+    return _FixedStructureSubproblem(
+        _build_relaxed_nlp(model, problem, false), feasibility)
+end
+
+# Binaries at the combination's 0/1, `r` at 0 (active) or M (inactive)
+function _point_at(model::Optimizer, relaxed::_RelaxedNLP, combination)
+    nlp = relaxed.subproblem.model
+    _set_fixes(nlp, relaxed.subproblem.fixes, combination)
+    M = Float64(MOI.get(model, M_Value()))
+    for (disjunct, fix) in relaxed.relaxation_fixes
+        MOI.set(nlp, MOI.ConstraintSet(), fix, MOI.EqualTo(
+            _disjunct_active(combination, disjunct) ? 0.0 : M))
+    end
+    return
+end
+
+function _solve_nlp(
+    ::FixedStructureSubproblems,
+    model::Optimizer,
+    problem::_Problem,
+    sub::_FixedStructureSubproblem,
+    combination::AbstractDict,
+    warm_start;
+    time_limit::Float64 = Inf
+    )
+    _point_at(model, sub.optimality, combination)
+    return _optimize_subproblem(model, problem, sub.optimality.subproblem,
+        sub.feasibility, combination, warm_start, time_limit)
 end
 
 ################################################################################
@@ -299,14 +470,14 @@ end
 ################################################################################
 # Rows of `func in set` relaxed by the nonnegative slack `u`; an
 # equality or interval relaxes on both sides
-_nlpf_slacked_rows(func, u, set::MOI.LessThan{Float64}) =
+_relaxed_rows(func, u, set::MOI.LessThan{Float64}) =
     [(MOI.Utilities.operate(-, Float64, func, u), set)]
-_nlpf_slacked_rows(func, u, set::MOI.GreaterThan{Float64}) =
+_relaxed_rows(func, u, set::MOI.GreaterThan{Float64}) =
     [(MOI.Utilities.operate(+, Float64, func, u), set)]
-function _nlpf_slacked_rows(func, u, set::MOI.EqualTo{Float64})
-    return _nlpf_slacked_rows(func, u, MOI.Interval(set.value, set.value))
+function _relaxed_rows(func, u, set::MOI.EqualTo{Float64})
+    return _relaxed_rows(func, u, MOI.Interval(set.value, set.value))
 end
-function _nlpf_slacked_rows(func, u, set::MOI.Interval{Float64})
+function _relaxed_rows(func, u, set::MOI.Interval{Float64})
     return [(MOI.Utilities.operate(-, Float64, func, u),
             MOI.LessThan(set.upper)),
         (MOI.Utilities.operate(+, Float64, func, u),
@@ -350,7 +521,7 @@ function _add_slacked_copy(
     end
     for (func, set) in rows
         mapped = _map_to(variable_map, func)
-        for (slacked, slacked_set) in _nlpf_slacked_rows(mapped, u, set)
+        for (slacked, slacked_set) in _relaxed_rows(mapped, u, set)
             MOI.add_constraint(nlp, slacked, slacked_set)
         end
     end
@@ -358,6 +529,7 @@ function _add_slacked_copy(
 end
 
 function _solve_nlpf(
+    ::Nothing,
     model::Optimizer,
     problem::_Problem,
     combination::AbstractDict,
@@ -368,6 +540,33 @@ function _solve_nlpf(
     variable_map, u = _add_slacked_copy(nlp, model, problem, combination)
     MOI.set(nlp, MOI.ObjectiveSense(), MOI.MIN_SENSE)
     MOI.set(nlp, MOI.ObjectiveFunction{MOI.VariableIndex}(), u)
+    return _solve_feasibility_nlp(nlp, problem, variable_map, combination,
+        warm_start, time_limit)
+end
+
+# The fixed-structure feasibility NLP, built once and repointed
+function _solve_nlpf(
+    feasibility::_RelaxedNLP,
+    model::Optimizer,
+    problem::_Problem,
+    combination::AbstractDict,
+    warm_start;
+    time_limit::Float64 = Inf
+    )
+    _point_at(model, feasibility, combination)
+    sub = feasibility.subproblem
+    return _solve_feasibility_nlp(sub.model, problem, sub.variable_map,
+        combination, warm_start, time_limit)
+end
+
+function _solve_feasibility_nlp(
+    nlp::MOI.ModelLike,
+    problem::_Problem,
+    variable_map::AbstractDict,
+    combination::AbstractDict,
+    warm_start,
+    time_limit::Float64
+    )
     _set_warm_start(nlp, variable_map, warm_start)
     _cap_remaining_time(nlp, time_limit)
     MOI.optimize!(nlp)

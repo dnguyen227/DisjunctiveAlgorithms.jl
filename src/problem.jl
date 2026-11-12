@@ -261,7 +261,7 @@ end
 
 # Constraint types the NLP subproblems receive: every global and
 # disjunct row plus the binary fixes and the NLPF slack variable.
-function _nlp_constraint_types(model::Optimizer, problem::_Problem)
+function _nlp_constraint_types(method, model::Optimizer, problem::_Problem)
     required = Set{Tuple{Type, Type}}([
         (MOI.VariableIndex, MOI.EqualTo{Float64}),
         (MOI.VariableIndex, MOI.GreaterThan{Float64}),
@@ -283,11 +283,14 @@ function _nlp_constraint_types(model::Optimizer, problem::_Problem)
     for disjunction in problem.disjunctions,
         disjunct in disjunction.disjuncts
         for (func, set) in zip(disjunct.functions, disjunct.sets)
-            push!(required, (typeof(func), typeof(set)))
+            union!(required, _disjunct_row_types(method, func, set))
         end
     end
     return required
 end
+
+# a disjunct row as the default method adds it
+_disjunct_row_types(method, func, set) = [(typeof(func), typeof(set))]
 
 function _check_support(solver, name::String, destination::String, required)
     for (F, S) in required
@@ -313,10 +316,14 @@ end
 
 _check_nlp_support(method, ::Optimizer, ::_Problem) = nothing
 
-function _check_nlp_support(::Nothing, model::Optimizer, problem::_Problem)
+_check_nlp_support(::Nothing, model::Optimizer, problem::_Problem) =
+    _check_nlp_solver(nothing, model, problem)
+
+# Check the `nlp_solver` against the rows `method` builds
+function _check_nlp_solver(method, model::Optimizer, problem::_Problem)
     nlp = _instantiate(model.nlp_solver)
     _check_support(nlp, "nlp_solver", "NLP subproblems",
-        _nlp_constraint_types(model, problem))
+        _nlp_constraint_types(method, model, problem))
     F = typeof(problem.objective)
     MOI.supports(nlp, MOI.ObjectiveFunction{F}()) || error(
         "The `nlp_solver` ($(MOI.get(nlp, MOI.SolverName()))) does " *

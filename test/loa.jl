@@ -183,6 +183,94 @@ function test_batched_matches_sequential()
     end
 end
 
+function test_fixed_structure_subproblems_loa()
+    # M = 100 still bounds every row, exp(4) included
+    for attrs in ((), (DA.M_Value() => 100.0,))
+        model, x, y = _batched_test_model(
+            DA.SubproblemMethod() => DA.FixedStructureSubproblems(), attrs...)
+        optimize!(model)
+        @test termination_status(model) == MOI.LOCALLY_SOLVED
+        @test objective_value(model) ≈ 1.0 atol = 1e-4
+        @test value(x) ≈ 0.0 atol = 1e-4
+        @test value(y) ≈ 1.0 atol = 1e-4
+    end
+end
+
+# Same results as the row-swapping default at every combination, with
+# the constraint count of the subproblem fixed across solves
+function test_fixed_structure_matches_default()
+    model, _, _ = _batched_test_model()
+    optimize!(model)
+    optimizer = unsafe_backend(model)
+    problem = DA._build_problem(optimizer)
+    combinations = _all_combinations(problem)
+    default_sub = DA._build_subproblem(nothing, optimizer, problem)
+    expected = DA._solve_nlps(nothing, optimizer, problem, default_sub,
+        combinations, nothing)
+    fixed = DA.FixedStructureSubproblems()
+    sub = DA._build_subproblem(fixed, optimizer, problem)
+    _num_rows(nlp) = sum(MOI.get(nlp, MOI.NumberOfConstraints{F, S}())
+        for (F, S) in MOI.get(nlp, MOI.ListOfConstraintTypesPresent()))
+    models = (sub.optimality.subproblem.model,
+        sub.feasibility.subproblem.model)
+    num_rows = map(_num_rows, models)
+    results = DA._solve_nlps(fixed, optimizer, problem, sub, combinations,
+        nothing)
+    @test map(_num_rows, models) == num_rows
+    @test count(r -> r.feasible, results) == 3
+    for (r, e) in zip(results, expected)
+        @test r.feasible == e.feasible
+        @test r.point !== nothing
+        r.feasible || continue
+        @test r.objective ≈ e.objective atol = 1e-5
+        for (vi, value) in e.point
+            @test r.point[vi] ≈ value atol = 1e-4
+        end
+    end
+end
+
+# M lives only in the relaxation fixes: no row carries it in its bound
+# or constant, where a solver's relative bound relaxation would scale
+# with it and loosen the active rows.
+function test_fixed_structure_exact_active_rows()
+    model = Model(_loa_optimizer(
+        DA.SubproblemMethod() => DA.FixedStructureSubproblems()))
+    set_silent(model)
+    @variable(model, 0 <= x <= 10)
+    @variable(model, z[1:2], Bin)
+    @constraint(model, [1, z[1], z[2], x, x] in DA.DisjunctionSet([
+        [MOI.LessThan(2.0)], [MOI.GreaterThan(9.0)]]))
+    @objective(model, Min, (x - 3)^2)
+    optimize!(model)
+    @test termination_status(model) == MOI.LOCALLY_SOLVED
+    @test value(x) ≈ 2.0 atol = 1e-6
+    optimizer = unsafe_backend(model)
+    problem = DA._build_problem(optimizer)
+    sub = DA._build_subproblem(DA.FixedStructureSubproblems(), optimizer,
+        problem)
+    affine = MOI.ScalarAffineFunction{Float64}
+    for nlp in (sub.optimality.subproblem.model,
+            sub.feasibility.subproblem.model),
+            S in (MOI.LessThan{Float64}, MOI.GreaterThan{Float64})
+        for ci in MOI.get(nlp, MOI.ListOfConstraintIndices{affine, S}())
+            row = MOI.get(nlp, MOI.ConstraintFunction(), ci)
+            set = MOI.get(nlp, MOI.ConstraintSet(), ci)
+            @test abs(MOI.constant(row)) < 1e3
+            @test abs(MOI.constant(set)) < 1e3
+        end
+    end
+    # without NLPF no feasibility model is built
+    MOI.set(optimizer, DA.UseNLPF(), false)
+    sub = DA._build_subproblem(DA.FixedStructureSubproblems(), optimizer,
+        problem)
+    @test sub.feasibility === nothing
+    # the support check asks for the relaxed rows, not the original sets
+    types = DA._nlp_constraint_types(DA.FixedStructureSubproblems(),
+        optimizer, problem)
+    @test (affine, MOI.GreaterThan{Float64}) in types
+    @test (affine, MOI.LessThan{Float64}) in types
+end
+
 # Two combinations per master solve through the no-good re-solve path
 # (HiGHS has no solution pool); same optimum, fewer master solves than
 # NLP solves.
@@ -1295,6 +1383,9 @@ end
     test_quadratic_row_shapes()
     test_batched_subproblems_loa()
     test_batched_matches_sequential()
+    test_fixed_structure_subproblems_loa()
+    test_fixed_structure_matches_default()
+    test_fixed_structure_exact_active_rows()
     test_multi_generation_cuts()
     test_combination_sources()
     test_quadratic_objective()
