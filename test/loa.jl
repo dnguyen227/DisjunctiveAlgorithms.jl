@@ -271,6 +271,27 @@ function test_fixed_structure_exact_active_rows()
     @test (affine, MOI.LessThan{Float64}) in types
 end
 
+# Each penalized slack only adds its own coefficient to the master's
+# objective; the solver's objective stays equal to `oa_objective`.
+function test_penalized_slack_objective()
+    model, _, _ = _batched_test_model()
+    optimize!(model)
+    optimizer = unsafe_backend(model)
+    problem = DA._build_problem(optimizer)
+    master = DA._build_master(optimizer, problem)
+    slacks = [DA._add_penalized_slack(master, optimizer, sign)
+        for sign in (1, 1, -1)]
+    attr = MOI.ObjectiveFunction{MOI.ScalarAffineFunction{Float64}}()
+    solver_objective = MOI.Utilities.canonical(MOI.get(master.model, attr))
+    @test solver_objective ≈ MOI.Utilities.canonical(master.oa_objective)
+    penalty = MOI.get(optimizer, DA.OASlack())
+    coefficients = Dict(term.variable => term.coefficient
+        for term in solver_objective.terms)
+    @test coefficients[master.alpha_oa] == 1.0
+    @test [coefficients[slack] for slack in slacks] ==
+        [penalty, penalty, -penalty]
+end
+
 # Two combinations per master solve through the no-good re-solve path
 # (HiGHS has no solution pool); same optimum, fewer master solves than
 # NLP solves.
@@ -1434,6 +1455,7 @@ end
 
 @testset "LOA units" begin
     test_set_cover_model()
+    test_penalized_slack_objective()
     test_set_cover_problem_master()
     test_cut_term_directions()
     test_activation_binary()
