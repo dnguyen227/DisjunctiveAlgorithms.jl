@@ -227,9 +227,12 @@ function test_exa_model_subproblems()
     expected = DA._solve_nlps(nothing, optimizer, problem, reference,
         combinations, nothing)
     @test count(r -> r.feasible, results) == 1
+    @test sub.feasibility !== nothing
     for (r, e) in zip(results, expected)
         @test r.feasible == e.feasible
         @test r.status == e.status
+        # the reused NLPF gives a restoration point when the default does
+        @test (r.point === nothing) == (e.point === nothing)
         r.feasible || continue
         @test r.objective ≈ e.objective atol = 1e-5
         for (vi, value) in e.point

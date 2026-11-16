@@ -199,9 +199,8 @@ function _add_penalized_slack(
     MOI.add_constraint(master.model, cut_slack,
         MOI.LessThan(Float64(MOI.get(model, MaxSlack()))))
     penalty = penalty_sign * Float64(MOI.get(model, OASlack()))
-    # one coefficient per cut; resetting the whole objective made adding
-    # n cuts cost O(n^2). Cuts are only added while the OA objective is
-    # the master's (set covering restores it first).
+    # set only this slack's coefficient; cuts are only added while the
+    # OA objective is the master's (set covering restores it first)
     push!(master.oa_objective.terms, MOI.ScalarAffineTerm(penalty, cut_slack))
     MOI.modify(master.model,
         MOI.ObjectiveFunction{MOI.ScalarAffineFunction{Float64}}(),
