@@ -1,5 +1,5 @@
 using JuMP
-import HiGHS, Ipopt
+import ExaModels, HiGHS, Ipopt, MadNLP
 
 function _loa_optimizer(attrs::Pair...)
     return optimizer_with_attributes(
@@ -181,6 +181,78 @@ function test_batched_matches_sequential()
         r.feasible && @test r.objective ≈ e.objective atol = 1e-5
         r.feasible || @test r.status == MOI.LOCALLY_INFEASIBLE
     end
+end
+
+# min x + y over [x >= 3] v [x <= 1] with y >= exp(x), 0 <= x <= 4 and
+# 0 <= y <= 10, the disjuncts empty and their rows global, gated by the
+# binaries (big-M 3): optimum 1 at (0, 1); x >= 3 needs exp(3) > 10.
+function _gated_test_model(nlp_solver, attrs::Pair...)
+    model = Model(optimizer_with_attributes(
+        () -> DA.Optimizer(nlp_solver, HiGHS.Optimizer), attrs...))
+    set_silent(model)
+    @variable(model, 0 <= x <= 4)
+    @variable(model, 0 <= y <= 10)
+    @variable(model, z[1:2], Bin)
+    @constraint(model, [1, z[1], z[2]] in DA.DisjunctionSet(
+        [MOI.AbstractScalarSet[], MOI.AbstractScalarSet[]]))
+    @constraint(model, x >= 3 - 3 * (1 - z[1]))
+    @constraint(model, x <= 1 + 3 * (1 - z[2]))
+    @constraint(model, y >= exp(x))
+    @objective(model, Min, x + y)
+    return model, x, y
+end
+
+_exa_nlp_solver() =
+    ExaModels.Optimizer(MadNLP.madnlp; print_level = MadNLP.ERROR)
+
+# One ExaModel serves every combination with the results of the default
+# method (which rebuilds through the ExaModels.Optimizer wrapper), and
+# LOA reaches the optimum on it
+function test_exa_model_subproblems()
+    method = DA.ExaModelSubproblems()
+    model, x, y = _gated_test_model(_exa_nlp_solver,
+        DA.SubproblemMethod() => method)
+    optimize!(model)
+    @test termination_status(model) == MOI.LOCALLY_SOLVED
+    @test objective_value(model) ≈ 1.0 atol = 1e-4
+    @test value(x) ≈ 0.0 atol = 1e-4
+    @test value(y) ≈ 1.0 atol = 1e-4
+    optimizer = unsafe_backend(model)
+    problem = DA._build_problem(optimizer)
+    sub = DA._build_subproblem(method, optimizer, problem)
+    reference = DA._build_subproblem(nothing, optimizer, problem)
+    combinations = _all_combinations(problem)
+    results = DA._solve_nlps(method, optimizer, problem, sub, combinations,
+        nothing)
+    expected = DA._solve_nlps(nothing, optimizer, problem, reference,
+        combinations, nothing)
+    @test count(r -> r.feasible, results) == 1
+    for (r, e) in zip(results, expected)
+        @test r.feasible == e.feasible
+        @test r.status == e.status
+        r.feasible || continue
+        @test r.objective ≈ e.objective atol = 1e-5
+        for (vi, value) in e.point
+            @test r.point[vi] ≈ value atol = 1e-4
+        end
+    end
+end
+
+# Rows inside a disjunct, or an nlp_solver that is not an
+# ExaModels.Optimizer, are refused before the loop
+function test_exa_model_subproblems_errors()
+    method = DA.SubproblemMethod() => DA.ExaModelSubproblems()
+    model = Model(optimizer_with_attributes(
+        () -> DA.Optimizer(_exa_nlp_solver, HiGHS.Optimizer), method))
+    set_silent(model)
+    @variable(model, 0 <= x <= 4)
+    @variable(model, z[1:2], Bin)
+    @constraint(model, [1, z[1], z[2], x, x] in DA.DisjunctionSet([
+        [MOI.GreaterThan(3.0)], [MOI.LessThan(1.0)]]))
+    @objective(model, Min, x)
+    @test_throws ErrorException optimize!(model)
+    model, _, _ = _gated_test_model(Ipopt.Optimizer, method)
+    @test_throws ErrorException optimize!(model)
 end
 
 # Each penalized slack only adds its own coefficient to the master's
@@ -1316,6 +1388,8 @@ end
     test_quadratic_row_shapes()
     test_batched_subproblems_loa()
     test_batched_matches_sequential()
+    test_exa_model_subproblems()
+    test_exa_model_subproblems_errors()
     test_multi_generation_cuts()
     test_combination_sources()
     test_quadratic_objective()

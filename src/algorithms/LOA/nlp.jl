@@ -144,6 +144,24 @@ function _solve_nlps(
 end
 
 ################################################################################
+#                        EXAMODEL SUBPROBLEMS
+################################################################################
+"""
+    ExaModelSubproblems()
+
+`SubproblemMethod` value for an `nlp_solver` that is an
+`ExaModels.Optimizer` (needs `using ExaModels`). The NLP is built as one
+ExaModel once; each combination only rewrites the indicator binaries'
+bounds and the start point on it and calls the optimizer's solver
+directly. A GPU backend therefore keeps its model on the device across
+solves instead of rebuilding and uploading it per NLP, as the
+`ExaModels.Optimizer` wrapper does. The model's rows never change, so
+every disjunct must be empty: write each disjunct row as a global row
+gated by its indicator binary (e.g. `g(x) - M (1 - z) <= 0`).
+"""
+struct ExaModelSubproblems end
+
+################################################################################
 #                        BATCHED SUBPROBLEMS
 ################################################################################
 """
